@@ -694,23 +694,26 @@ class Window:
         root = self.root
         top = tk.Frame(root, bg=C["surface"], padx=16, pady=10)
         top.pack(fill="x")
-        titles = tk.Frame(top, bg=C["surface"])
+        # The right-hand controls are packed first so they always get their room; the title
+        # block on the left hides itself when the window is too narrow for everything.
+        right = tk.Frame(top, bg=C["surface"])
+        right.pack(side="right")
+        self.titles = titles = tk.Frame(top, bg=C["surface"])
         titles.pack(side="left")
         tk.Label(titles, text="Slay the Spire 2 Mods", font=F["app"], bg=C["surface"], fg=C["fg"]) \
             .pack(anchor="w")
         self.subtitle = tk.Label(titles, text="", font=F["small"], bg=C["surface"], fg=C["dim"])
         self.subtitle.pack(anchor="w")
 
-        tabs = tk.Frame(top, bg=C["surface2"], padx=3, pady=3)
+        self.tabs = tabs = tk.Frame(top, bg=C["surface2"], padx=3, pady=3)
         tabs.pack(side="left", padx=(28, 0))
+        top.bind("<Configure>", lambda e: self._fit_top_bar(e.width))
         self.tab_buttons = {}
         for key, text in (("installed", "My mods"), ("browse", "Get mods")):
             b = Pill(tabs, text, lambda k=key: self.show_page(k), "ghost", pady=5, padx=16, radius=7)
             b.pack(side="left")
             self.tab_buttons[key] = b
 
-        right = tk.Frame(top, bg=C["surface"])
-        right.pack(side="right")
         self.spinner = Spinner(right)
         self.spinner.pack(side="left", padx=(0, 12))
         Tooltip(self.spinner, "Checking mods…")
@@ -753,6 +756,17 @@ class Window:
         close.pack(side="left", padx=(12, 0))
         close.bind("<Button-1>", lambda e: self.toast_frame.place_forget())
         self.show_page("installed")
+
+    def _fit_top_bar(self, width):
+        right = self.play_btn.master
+        need = 32 + self.tabs.winfo_reqwidth() + right.winfo_reqwidth() + 28 + 16
+        show = width >= need + self.titles.winfo_reqwidth()
+        if show and not self.titles.winfo_manager():
+            self.titles.pack(side="left", before=self.tabs)
+            self.tabs.pack_configure(padx=(28, 0))
+        elif not show and self.titles.winfo_manager():
+            self.titles.pack_forget()
+            self.tabs.pack_configure(padx=(0, 0))
 
     def _build_installed(self):
         page = self.installed
@@ -851,8 +865,7 @@ class Window:
     def refresh_chrome(self):
         st, g = self.state, self.state.game
         enabled = sum(1 for m in st.mods if st.enabled(m))
-        self.subtitle.configure(text=f"Game {g.version_text} · {g.branch} branch · {enabled} of "
-                                     f"{len(st.mods)} enabled")
+        self.subtitle.configure(text=f"Game {g.version_text} · {g.branch} · {enabled}/{len(st.mods)} enabled")
         counts = {}
         for mid in st.mods:
             if st.enabled(mid):
