@@ -68,9 +68,9 @@ folder in Applications once. The app tells you if this is needed.
 - **Keyboard.** ↑/↓ move through the list (Page Up/Down, Home/End jump), Space enables or
   disables the selected mod, Enter applies, Esc clears the search or the selection,
   Ctrl+F (⌘F) searches, Ctrl+S (⌘S) applies, F5 rescans.
-- **Co-op compare.** *Copy my mod list code* puts one line of text on your clipboard
+- **Co-op compare.** **Copy mod list** puts one line of text on your clipboard
   (`STS2:…`, about 100 characters for 8 mods, under 500 for 60). Paste it in Discord or wherever; your friend
-  opens *Compare with a friend's code* (it picks the code up from the clipboard) to see
+  presses **Import mod list** (it picks the code up from the clipboard) to see
   the branch/version differences and the mods to subscribe to, enable or disable.
   *Subscribe to all* gets the missing ones and *Match their setup* stages the rest.
 - **Get mods.** The *Get mods* tab browses and searches the Workshop (trending, most

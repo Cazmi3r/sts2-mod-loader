@@ -171,7 +171,6 @@ class Pill(tk.Canvas):
         self.text = text
         self._draw()
         if command:
-            self.configure(cursor="hand2")
             self.bind("<Enter>", lambda e: self._set_hover(True))
             self.bind("<Leave>", lambda e: self._set_hover(False))
             self.bind("<ButtonRelease-1>", self._click)
@@ -216,7 +215,6 @@ class Pill(tk.Canvas):
 
     def set_enabled(self, on):
         self.enabled = bool(on)
-        self.configure(cursor="hand2" if on and self.command else "")
         self._draw()
 
     def restyle(self, bg=None):
@@ -239,7 +237,7 @@ class Toggle(tk.Canvas):
         self.style = style
         self.w, self.h = (18, 18) if style == "check" else (38, 22)
         super().__init__(parent, width=self.w, height=self.h, highlightthickness=0, bd=0,
-                         bg=parent_bg(parent), cursor="hand2", takefocus=0)
+                         bg=parent_bg(parent), takefocus=0)
         self.value, self.command, self.hover = bool(value), command, False
         self.bind("<Button-1>", self._click)
         self.bind("<Enter>", lambda e: self._hover(True))

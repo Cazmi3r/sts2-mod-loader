@@ -217,7 +217,7 @@ class Row(tk.Frame):
     """A selectable list row with hover and selection colors."""
 
     def __init__(self, parent, on_select, on_drag=None):
-        super().__init__(parent, bg=C["surface"], cursor="hand2")
+        super().__init__(parent, bg=C["surface"])
         self.on_select, self.selected, self.hovered = on_select, False, False
         self.on_drag = on_drag        # on_drag(kind, event) with kind press / motion / release
         self.stripe = tk.Frame(self, bg=C["surface"], width=3)
@@ -721,7 +721,10 @@ class Window:
     def __init__(self, root):
         self.root = root
         root.title(APP_NAME)
-        root.geometry("1240x800")
+        # Wide enough for the whole top bar, but never bigger than the screen.
+        w = min(1340, root.winfo_screenwidth() - 40)
+        h = min(820, root.winfo_screenheight() - 80)
+        root.geometry(f"{w}x{h}")
         root.minsize(900, 560)
         self.icon = app_icon(root)
         try:
@@ -784,7 +787,12 @@ class Window:
         self.spinner = Spinner(right)
         self.spinner.pack(side="left", padx=(0, 12))
         Tooltip(self.spinner, "Checking mods…")
-        self.profile = Select(right, [("", "Profiles…")], "", on_change=self._on_profile_chosen, width=16)
+        Pill(right, "Copy mod list", self.copy_share_code,
+             tooltip="Copy a one-line code of your mod list to send to a friend").pack(side="left")
+        Pill(right, "Import mod list", self.compare_dialog,
+             tooltip="Paste a friend's mod list code to see what differs and match their setup").pack(side="left", padx=(6, 0))
+        tk.Frame(right, bg=C["border"], width=1, height=22).pack(side="left", padx=12)
+        self.profile = Select(right, [("", "Profiles…")], "", on_change=self._on_profile_chosen, width=13)
         self.profile.pack(side="left")
         Pill(right, "Save as…", self.save_profile_dialog, tooltip="Save the current setup as a profile") \
             .pack(side="left", padx=(6, 0))
@@ -818,7 +826,7 @@ class Window:
         self.toast_label = tk.Label(self.toast_frame, bg=C["toast_bg"], fg=C["toast_fg"], wraplength=620,
                                     justify="left")
         self.toast_label.pack(side="left")
-        close = tk.Label(self.toast_frame, text="✕", bg=C["toast_bg"], fg=C["toast_fg"], cursor="hand2",
+        close = tk.Label(self.toast_frame, text="✕", bg=C["toast_bg"], fg=C["toast_fg"],
                          padx=6)
         close.pack(side="left", padx=(12, 0))
         close.bind("<Button-1>", lambda e: self.toast_frame.place_forget())
@@ -847,6 +855,13 @@ class Window:
         self.sort.pack(side="left", padx=(8, 0))
         self.summary = tk.Label(bar, text="", fg=C["dim"], bg=C["surface"], font=F["small"])
         self.summary.pack(side="left", padx=(12, 0))
+        # Shown only when there's something to act on (see refresh_chrome).
+        self.broken_btn = Pill(bar, "", self.disable_broken, "danger",
+                               tooltip="Mark every enabled mod that looks broken to be disabled. "
+                                       "Nothing is written until you Apply.")
+        self.fix_btn = Pill(bar, "", self.fix_all, "secondary",
+                            tooltip="Apply the automatic fixes the health check found "
+                                    "(for example, misnamed files)")
         tk.Frame(page, bg=C["border"], height=1).pack(fill="x")
 
         paned = tk.PanedWindow(page, orient="horizontal", sashwidth=5, bg=C["border"], bd=0,
@@ -862,11 +877,6 @@ class Window:
 
     def _build_menu(self):
         m = tk.Menu(self.root, tearoff=False)
-        m.add_command(label="Copy my mod list code", command=self.copy_share_code)
-        m.add_command(label="Compare with a friend's code…", command=self.compare_dialog)
-        m.add_separator()
-        m.add_command(label="Disable all broken mods", command=self.disable_broken)
-        m.add_command(label="Apply automatic fixes", command=self.fix_all)
         m.add_command(label="Delete a profile…", command=self.delete_profile_dialog)
         m.add_separator()
         m.add_command(label="Restore settings backup…", command=self.restore_dialog)
@@ -1021,13 +1031,18 @@ class Window:
             if st.enabled(mid):
                 s = st.status(mid)
                 counts[s] = counts.get(s, 0) + 1
-        bits = []
-        if counts.get(S_ERROR):
-            bits.append(f"{counts[S_ERROR]} broken")
-        if counts.get(S_WARN):
-            bits.append(f"{counts[S_WARN]} with warnings")
-        self.summary.configure(text=("Enabled: " + ", ".join(bits)) if bits else "",
-                               fg=C["error"] if counts.get(S_ERROR) else C["dim"])
+        warns = counts.get(S_WARN, 0)
+        self.summary.configure(text=f"{warns} enabled with warnings" if warns else "", fg=C["dim"])
+        broken = counts.get(S_ERROR, 0)
+        fixable = sum(1 for m in st.mods.values() for i in m.static_issues if i.fix)
+        for btn, n, text in ((self.broken_btn, broken, f"Disable {plural(broken, 'broken mod')}"),
+                             (self.fix_btn, fixable, f"Apply {plural(fixable, 'fix', 'es')}")):
+            if n:
+                btn.set_text(text)
+                if not btn.winfo_manager():
+                    btn.pack(side="left", padx=(8, 0))
+            elif btn.winfo_manager():
+                btn.pack_forget()
 
         problems = list(g.problems) + ([st.settings_error] if st.settings_error else [])
         self._bar(self.bar_error, "\n".join(problems))
@@ -1370,7 +1385,7 @@ class Window:
     def _link(self, parent, mod_id, suffix=""):
         mod = self.state.mods[mod_id]
         status = self.state.status(mod_id)
-        box = tk.Frame(parent, bg=parent.cget("bg"), cursor="hand2")
+        box = tk.Frame(parent, bg=parent.cget("bg"))
         dot = tk.Label(box, text=STATUS_DOT[status], fg=status_color(status), bg=box.cget("bg"), font=F["dot"])
         dot.pack(side="left")
         name = tk.Label(box, text=mod.name, fg=C["accent"], bg=box.cget("bg"))
@@ -1711,7 +1726,7 @@ class Window:
         mod_id, i, ids = d["id"], d["index"], list(self.visible_ids)
         row = self.rows.get(mod_id)
         if row:
-            row.configure(cursor="hand2")
+            row.configure(cursor="")
         if i is None or mod_id not in ids:
             self.refresh_rows([mod_id])
             return
@@ -1922,30 +1937,51 @@ class Window:
         n = sum(1 for m in st.mods if st.enabled(m))
         note = " (includes unapplied changes)" if st.change_count() else ""
         self.toast(f"Copied a code for your {plural(n, 'enabled mod')}{note}. Paste it to your friend; they "
-                   "use Compare with a friend's code.")
+                   "press Import mod list and paste it.")
 
     def compare_dialog(self):
+        """Import mod list: a friend's code already on the clipboard is compared right away.
+        Anything else is ignored and the paste box opens, ready to type into."""
         try:
             clip = self.root.clipboard_get()
         except tk.TclError:
             clip = ""
+        note = ""
         found = profiles.find_share_code(clip)
         if found and found == profiles.share_code(self.state.states(), self.state.mods, self.state.game):
-            found = None            # that's our own code, not the friend's
-        dlg = Dialog(self.root, "Compare with a friend", width=520)
+            note = "The clipboard has your own mod list, so it wasn't used."
+        elif found:
+            try:
+                theirs = profiles.parse_share_code(found)
+            except ValueError as e:
+                note = f"The clipboard has a mod list code, but it couldn't be read: {e}"
+            else:
+                self._compare_with(theirs)
+                return
+        dlg = Dialog(self.root, "Import mod list", width=520)
         dlg.heading("Paste your friend's code",
-                    "They get it from ••• → Copy my mod list code. Pasting their whole message works too.")
+                    "They get it from the Copy mod list button. Pasting their whole message works too.")
+        if note:
+            WrapLabel(dlg.body, note, fg=C["warn"], font=F["small"]).pack(fill="x", pady=(8, 0))
         box = tk.Frame(dlg.body, bg=C["border"], padx=1, pady=1)
         box.pack(fill="both", expand=True, pady=(14, 0))
         text = tk.Text(box, height=5, width=1, wrap="char", font=F["mono"], bg=C["input"], fg=C["fg"], relief="flat",
                        bd=0, highlightthickness=0, insertbackground=C["fg"], padx=8, pady=6)
         text.pack(fill="both", expand=True)
-        if found:
-            text.insert("1.0", found)
-        text.focus_set()
-        pasted = {"text": found or ""}
-        text.bind("<KeyRelease>", lambda e: pasted.update(text=text.get("1.0", "end")))
-        text.bind("<<Paste>>", lambda e: self.root.after_idle(lambda: pasted.update(text=text.get("1.0", "end"))))
+        # Read the box at the moment the dialog closes (it's gone afterwards), so it doesn't matter
+        # how the text got there: typing, Ctrl+V, a menu, or a middle-click paste on Linux.
+        pasted = {"text": ""}
+        close = dlg.close
+
+        def closing(value=None):
+            try:
+                pasted["text"] = text.get("1.0", "end")
+            except tk.TclError:
+                pass
+            close(value)
+        dlg.close = closing
+        # run() focuses the dialog window itself; put the cursor in the paste box after that
+        dlg.after(60, text.focus_force)
         dlg.button("Compare", 1, "primary", default=True)
         dlg.button("Cancel", 0)
         if dlg.run() != 1:
@@ -1955,6 +1991,9 @@ class Window:
         except ValueError as e:
             self.error("Couldn't read that code", str(e))
             return
+        self._compare_with(theirs)
+
+    def _compare_with(self, theirs):
         # Workshop mods come without names; look them up before showing the comparison.
         wids = [m["workshop_id"] for m in theirs["mods"] if m.get("workshop_id")]
 
