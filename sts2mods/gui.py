@@ -16,7 +16,7 @@ from . import game as game_mod
 from . import mods as mods_mod
 from . import settings as settings_mod
 from .logscan import S_ERROR, S_OK, S_STALE, S_UNTESTED, S_WARN, STATUS_RANK
-from .ui import (C, F, Dialog, InfoBar, Pill, ReadOnlyText, ScrollFrame, SearchEntry, Select, Spinner,
+from .ui import (C, F, ChoiceList, Dialog, InfoBar, Pill, ReadOnlyText, ScrollFrame, SearchEntry, Select, Spinner,
                  Toggle, Tooltip, WrapLabel, apply_theme, app_icon, badge, blend, install_wheel,
                  load_image, soft)
 
@@ -492,7 +492,7 @@ class BrowsePage(tk.Frame):
         gen = self.gen
         query = self.search.value()
         sort = self.sort.key()
-        self.sort.configure(state="disabled" if query else "readonly")
+        self.sort.set_enabled(not query)
         self.more.set_enabled(False)
         self.spinner.start()
         self._placeholder("Searching the Workshop…" if query else "Loading the Workshop…")
@@ -921,7 +921,7 @@ class Window:
         if w is None or w.winfo_toplevel() is not self.root or self.root.grab_current() not in (None, self.root):
             return None
         cls = w.winfo_class()
-        if cls in ("TCombobox", "Text", "Listbox"):
+        if isinstance(w, Select) or cls in ("Text", "Listbox"):
             return None
         if cls in ("TEntry", "Entry"):
             # From a search box only Down (into the list) applies; the box handles Escape itself.
@@ -1917,8 +1917,9 @@ class Window:
             return
         dlg = Dialog(self.root, "Delete profile")
         dlg.heading("Delete a profile")
-        sel = Select(dlg.body, [(n, n) for n in names], names[0])
+        sel = ChoiceList(dlg.body, [(n, n) for n in names], names[0])
         sel.pack(fill="x", pady=(14, 0))
+        dlg.after(60, sel.focus_set)
         dlg.button("Delete", 1, "danger")
         dlg.button("Cancel", 0)
         chosen = {}
@@ -2087,9 +2088,10 @@ class Window:
         dlg.heading("Restore settings backup",
                     "Restores the game's settings.save (including which mods are enabled) to how it was "
                     "before an earlier Apply. Your current file is backed up first.")
-        sel = Select(dlg.body, [(b, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(b))))
-                                for b in backups], backups[0])
+        sel = ChoiceList(dlg.body, [(b, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(b))))
+                                    for b in backups], backups[0])
         sel.pack(fill="x", pady=(14, 0))
+        dlg.after(60, sel.focus_set)
         chosen = {"k": backups[0]}
         sel.bind("<<ComboboxSelected>>", lambda e: chosen.update(k=sel.key()), add="+")
         dlg.button("Restore", 1, "primary")

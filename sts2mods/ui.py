@@ -91,12 +91,6 @@ def apply_theme(root, dark=None):
     root.option_add("*Menu.activeForeground", C["accent_fg"])
     root.option_add("*Menu.relief", "flat")
     root.option_add("*Menu.borderWidth", 1)
-    root.option_add("*TCombobox*Listbox.background", C["surface"])
-    root.option_add("*TCombobox*Listbox.foreground", C["fg"])
-    root.option_add("*TCombobox*Listbox.selectBackground", C["accent"])
-    root.option_add("*TCombobox*Listbox.selectForeground", C["accent_fg"])
-    root.option_add("*TCombobox*Listbox.font", F["base"])
-    root.option_add("*TCombobox*Listbox.borderWidth", 0)
 
     st = ttk.Style(root)
     st.theme_use("clam")
@@ -109,13 +103,6 @@ def apply_theme(root, dark=None):
                  insertcolor=C["fg"], padding=(8, 6))
     st.configure("TEntry", **field)
     st.map("TEntry", bordercolor=[("focus", C["accent"])], lightcolor=[("focus", C["accent"])])
-    st.configure("TCombobox", **field, arrowcolor=C["dim"], arrowsize=13)
-    st.map("TCombobox",
-           fieldbackground=[("readonly", C["input"])], foreground=[("readonly", C["fg"])],
-           selectbackground=[("readonly", C["input"])], selectforeground=[("readonly", C["fg"])],
-           background=[("active", C["hover"]), ("readonly", C["input"])],
-           bordercolor=[("focus", C["accent"]), ("active", C["faint"])],
-           lightcolor=[("focus", C["accent"])], arrowcolor=[("active", C["fg"])])
     for orient in ("Vertical", "Horizontal"):
         track = blend(C["fg"], C["surface"], 0.06)     # no grip lines: gripcount on Tk 8.6, gripsize on Tk 9
         st.configure(f"{orient}.TScrollbar", background=blend(C["fg"], C["surface"], 0.55),
@@ -541,35 +528,417 @@ class SearchEntry(ttk.Entry):
         self.var.set(text)
 
 
-class Select(ttk.Combobox):
-    """A read-only dropdown of (key, label) choices."""
+class Select(tk.Canvas):
+    """A dropdown drawn as one rounded box (text and arrow together) with a themed list that
+    opens below it. Looks the same on every system. Same interface as before: choices are
+    (key, label) pairs; key(), set_key(), set_choices(), get(); fires on_change and
+    <<ComboboxSelected>> when the user picks an item."""
+
+    PADX, ARROW_W, MAX_ROWS = 10, 22, 12
+    _open = None                       # the Select whose list is showing, if any
 
     def __init__(self, parent, choices, value=None, on_change=None, width=None):
+        self.pbg = parent_bg(parent)
+        super().__init__(parent, highlightthickness=0, bd=0, bg=self.pbg, takefocus=1)
         self.choices = list(choices)
-        super().__init__(parent, state="readonly", values=[t for _, t in self.choices], font=F["base"],
-                         width=width or max(len(t) for _, t in self.choices) + 1)
         self.on_change = on_change
+        self.index = 0 if self.choices else -1
+        self.enabled = True
+        self.hover = self.focused = False
+        self.popup = None
+        self.hl = -1                   # highlighted row in the open list
+        chars = width or max((len(t) for _, t in self.choices), default=8) + 1
+        font = F["base"]
+        self.req_w = font.measure("0") * chars + 2 * self.PADX + self.ARROW_W
+        self.req_h = font.metrics("linespace") + 14
+        self.configure(width=self.req_w, height=self.req_h)
         if value is not None:
             self.set_key(value, quiet=True)
-        self.bind("<<ComboboxSelected>>", lambda e: (self.selection_clear(), on_change and on_change()))
+        self.bind("<Configure>", lambda e: self._draw())
+        self.bind("<Enter>", lambda e: self._set_hover(True))
+        self.bind("<Leave>", lambda e: self._set_hover(False))
+        self.bind("<ButtonPress-1>", lambda e: (self.focus_set(), self.toggle()))
+        self.bind("<FocusIn>", lambda e: self._set_focus(True))
+        self.bind("<FocusOut>", lambda e: self._set_focus(False))
+        for seq, fn in (("<Down>", lambda: self._key_step(1)), ("<Up>", lambda: self._key_step(-1)),
+                        ("<Prior>", lambda: self._key_step(-self.MAX_ROWS)),
+                        ("<Next>", lambda: self._key_step(self.MAX_ROWS)),
+                        ("<space>", self._key_enter), ("<Return>", self._key_enter),
+                        ("<KP_Enter>", self._key_enter), ("<Escape>", self._key_escape),
+                        ("<Tab>", lambda: (self.close(), None)[1])):
+            self.bind(seq, lambda e, fn=fn: fn())
+        self._draw()
+
+    # ---- value ---------------------------------------------------------------------------
 
     def key(self):
-        i = self.current()
-        return self.choices[i][0] if i >= 0 else None
+        return self.choices[self.index][0] if 0 <= self.index < len(self.choices) else None
+
+    def get(self):
+        return self.choices[self.index][1] if 0 <= self.index < len(self.choices) else ""
+
+    def current(self):
+        return self.index
 
     def set_key(self, key, quiet=False):
         for i, (k, _t) in enumerate(self.choices):
             if k == key:
-                self.current(i)
+                self.index = i
+                self._draw()
                 if not quiet and self.on_change:
                     self.on_change()
                 return
 
     def set_choices(self, choices, value=None):
+        old = self.key()
         self.choices = list(choices)
-        self.configure(values=[t for _, t in self.choices])
+        keys = [k for k, _ in self.choices]
+        want = value if value is not None else old
+        self.index = keys.index(want) if want in keys else (0 if self.choices else -1)
+        if self.popup:
+            self.close()
+        self._draw()
+
+    def set_enabled(self, on):
+        self.enabled = bool(on)
+        if not on:
+            self.close()
+        self.configure(takefocus=1 if on else 0)
+        self._draw()
+
+    def configure(self, cnf=None, **kw):
+        # Accept the old dropdown's state option: "disabled", or "normal"/"readonly".
+        if "state" in kw:
+            self.set_enabled(kw.pop("state") != "disabled")
+        return super().configure(cnf, **kw) if (cnf or kw) else None
+
+    config = configure
+
+    def _pick(self, i):
+        self.close()
+        if not 0 <= i < len(self.choices):
+            return
+        self.index = i
+        self._draw()
+        if self.on_change:
+            self.on_change()
+        self.event_generate("<<ComboboxSelected>>")
+
+    # ---- drawing -------------------------------------------------------------------------
+
+    def _set_hover(self, on):
+        self.hover = on
+        self._draw()
+
+    def _set_focus(self, on):
+        self.focused = on
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        w = max(self.winfo_width(), 2) if self.winfo_ismapped() else self.req_w
+        h = self.req_h
+        on = getattr(self, "enabled", True)
+        active = on and (self.hover or self.popup is not None)
+        fill = C["hover"] if active else (C["input"] if on else blend(C["input"], self.pbg, 0.5))
+        edge = C["accent"] if on and (self.focused or self.popup) else \
+            (C["faint"] if active else C["border"])
+        _round_rect(self, 1, 1, w - 1, h - 1, 7, fill=fill, outline=edge, width=1)
+        font = F["base"]
+        text, room = self.get(), w - 2 * self.PADX - self.ARROW_W + 6
+        if font.measure(text) > room:
+            while text and font.measure(text + "…") > room:
+                text = text[:-1]
+            text += "…"
+        self.create_text(self.PADX, h / 2, text=text, anchor="w", font=font,
+                         fill=C["fg"] if on else C["faint"])
+        cx, cy = w - self.PADX - 5, h / 2
+        up = self.popup is not None
+        pts = (cx - 4, cy + 2, cx, cy - 2, cx + 4, cy + 2) if up else (cx - 4, cy - 2, cx, cy + 2, cx + 4, cy - 2)
+        self.create_line(*pts, fill=C["fg"] if active else (C["dim"] if on else C["faint"]), width=1.6,
+                         capstyle="round",
+                         joinstyle="round")
+
+    def restyle(self, bg=None):
+        self.pbg = bg or parent_bg(self.master)
+        self.configure(bg=self.pbg)
+        self._draw()
+
+    # ---- the list ------------------------------------------------------------------------
+
+    def toggle(self):
+        self.close() if self.popup else self.open()
+
+    def open(self):
+        """Show the list as an overlay inside this window: no separate OS window and no grab,
+        so it behaves the same everywhere (dialogs included) and can never lock the app."""
+        if not self.enabled:
+            return
+        if Select._open is not None and Select._open is not self:
+            Select._open.close()
+        if self.popup or not self.choices:
+            return
+        win = self.winfo_toplevel()
+        win.update_idletasks()
+        font = F["base"]
+        # Measure a real row: label borders and padding differ by system and font.
+        probe = self._row(win, "Ag", False)
+        probe.update_idletasks()
+        row_h = probe.winfo_reqheight()
+        probe.destroy()
+        content_h = len(self.choices) * row_h + 8 + 2
+        # Room below and above the box, inside the window.
+        top_y = self.winfo_rooty() - win.winfo_rooty()
+        below_y = top_y + self.winfo_height() + 4
+        room_below = win.winfo_height() - below_y - 8
+        room_above = top_y - 4 - 8
+        # When it has to scroll, show half of the next row: a clear "there's more" cue.
+        want_h = min(content_h, self.MAX_ROWS * row_h + row_h // 2 + 4 + 2)
+        if want_h <= room_below or room_below >= room_above:
+            h, y = min(want_h, max(room_below, row_h + 10)), below_y
+        else:
+            h = min(want_h, room_above)
+            y = top_y - 4 - h
+        width = max(self.winfo_width(), max(font.measure(t) for _, t in self.choices) + 2 * 14 + 24)
+        width = min(width, win.winfo_width() - 16)
+        x = self.winfo_rootx() - win.winfo_rootx()
+        x = max(8, min(x, win.winfo_width() - width - 8))
+
+        frame = self.popup = tk.Frame(win, bg=C["border"])
+        if h < content_h:                                   # doesn't all fit: scroll
+            holder = ScrollFrame(frame, bg=C["surface"], pady=4)
+            body = holder.body
+        else:
+            holder = body = tk.Frame(frame, bg=C["surface"], pady=4)
+        holder.pack(padx=1, pady=1, fill="both", expand=True)
+        self.rows = []
+        for i, (_k, t) in enumerate(self.choices):
+            lb = self._row(body, t, i == self.index)
+            lb.pack(fill="x")
+            lb.bind("<Enter>", lambda e, i=i: self._highlight(i))
+            lb.bind("<ButtonRelease-1>", lambda e, i=i: self._pick(i))
+            self.rows.append(lb)
+        frame.place(x=x, y=y, width=width, height=h)
+        frame.lift()
+        Select._open = self
+        self._win_size = (win.winfo_width(), win.winfo_height())
+        _guard_clicks(win, frame)
+        self._highlight(self.index)
+        if isinstance(holder, ScrollFrame) and self.index >= 0:
+            holder.see(self.rows[self.index])
+        self._watch = self.after(200, self._watch_parent)
+        self._draw()
+
+    @staticmethod
+    def _row(parent, text, current):
+        return tk.Label(parent, text=text, anchor="w", padx=14, pady=5, font=F["base"], bd=0,
+                        highlightthickness=0, bg=C["surface"], fg=C["accent"] if current else C["fg"])
+
+    def close(self, keep_guard=False):
+        if self.popup is None:
+            return
+        if getattr(self, "_watch", None):
+            self.after_cancel(self._watch)
+            self._watch = None
+        self.popup.destroy()
+        self.popup, self.rows, self.hl = None, [], -1
+        if Select._open is self:
+            Select._open = None
+        if not keep_guard:
+            _unguard_clicks()
+        if self.winfo_exists():
+            self._draw()
+
+    def _watch_parent(self):
+        """Close the list if the window was resized or the dropdown disappeared."""
+        self._watch = None
+        if self.popup is None:
+            return
+        try:
+            win = self.winfo_toplevel()
+            changed = (win.winfo_width(), win.winfo_height()) != self._win_size
+            gone = not self.winfo_viewable()
+        except tk.TclError:
+            changed = gone = True
+        if changed or gone:
+            self.close()
+        else:
+            self._watch = self.after(200, self._watch_parent)
+
+    def _highlight(self, i):
+        self.hl = i
+        for j, lb in enumerate(self.rows):
+            lb.configure(bg=C["select"] if j == i else C["surface"])
+
+    # ---- keyboard ------------------------------------------------------------------------
+
+    def _key_step(self, d):
+        if self.popup:
+            self._highlight(max(0, min(len(self.rows) - 1, self.hl + d)))
+            w = self.rows[self.hl].master
+            while w is not None and not isinstance(w, ScrollFrame):
+                w = w.master
+            if w is not None:
+                w.see(self.rows[self.hl])
+        else:
+            self.open()
+        return "break"
+
+    def _key_enter(self):
+        if self.popup:
+            self._pick(self.hl)
+        else:
+            self.open()
+        return "break"
+
+    def _key_escape(self):
+        if self.popup:
+            self.close()
+            return "break"
+        return None
+
+
+# While a dropdown list is open, a click anywhere else in its window closes the list and is
+# swallowed (press and release), so the button or row behind it doesn't also react. Done with
+# a bindtag put in front of every other widget in the window, removed again afterwards.
+_GUARD = "SelectClickGuard"
+_guarded = []          # [(widget, original bindtags)]
+_swallow_release = [False]
+
+
+def _guard_clicks(win, popup):
+    root = win._root()
+    if not getattr(root, "_select_guard_bound", False):
+        root._select_guard_bound = True
+        for b in (1, 2, 3):           # real buttons only (on Linux 4/5 are the wheel)
+            root.bind_class(_GUARD, f"<ButtonPress-{b}>", _guard_press)
+            root.bind_class(_GUARD, f"<ButtonRelease-{b}>", _guard_release)
+    _unguard_clicks()
+    stack = [win]
+    while stack:
+        w = stack.pop()
+        if w is popup:
+            continue                  # clicks in the list itself work normally
+        if not isinstance(w, tk.Toplevel) or w is win:
+            tags = w.bindtags()
+            if _GUARD not in tags:
+                _guarded.append((w, tags))
+                w.bindtags((_GUARD,) + tags)
+            stack.extend(w.winfo_children())
+
+
+def _unguard_clicks():
+    for w, tags in _guarded:
+        try:
+            if w.winfo_exists():
+                w.bindtags(tuple(t for t in w.bindtags() if t != _GUARD))
+        except tk.TclError:
+            pass
+    _guarded.clear()
+
+
+def _guard_press(e):
+    """A click outside the open list: close it, and keep the guard until this click's
+    release so nothing behind reacts to either half of the click."""
+    sel = Select._open
+    if sel is not None:
+        _swallow_release[0] = True
+        sel.close(keep_guard=True)
+        try:
+            e.widget.after(1000, _release_guard_late)    # in case the release never comes
+        except (tk.TclError, AttributeError):
+            pass
+    else:
+        _unguard_clicks()
+    return "break"
+
+
+def _guard_release(e):
+    _swallow_release[0] = False
+    if Select._open is None:
+        _unguard_clicks()
+    return "break"
+
+
+def _release_guard_late():
+    if _swallow_release[0] and Select._open is None:
+        _swallow_release[0] = False
+        _unguard_clicks()
+
+
+class ChoiceList(tk.Frame):
+    """A list of choices shown in place (for dialogs, where a dropdown's list has no room):
+    a bordered box of rows, scrolling when there are more than `rows`. Click a row or use
+    Up/Down/Home/End to pick. Same interface as Select (key, get, set_key, current, choices,
+    on_change, <<ComboboxSelected>>), so callers can use either."""
+
+    def __init__(self, parent, choices, value=None, on_change=None, rows=6):
+        super().__init__(parent, bg=C["border"], padx=1, pady=1, takefocus=1)
+        self.choices = list(choices)
+        self.on_change = on_change
+        self.index = 0 if self.choices else -1
+        probe = Select._row(self, "Ag", False)
+        probe.update_idletasks()
+        row_h = probe.winfo_reqheight()
+        probe.destroy()
+        if len(self.choices) > rows:
+            self.scroll = ScrollFrame(self, bg=C["surface"], pady=4)
+            self.scroll.configure(height=rows * row_h + row_h // 2 + 4)   # half a row peeks out
+            self.scroll.pack_propagate(False)
+            body = self.scroll.body
+        else:
+            self.scroll = None
+            body = tk.Frame(self, bg=C["surface"], pady=4)
+        (self.scroll or body).pack(fill="both", expand=True)
+        self.rows = []
+        for i, (_k, t) in enumerate(self.choices):
+            lb = Select._row(body, t, False)
+            lb.pack(fill="x")
+            lb.bind("<Button-1>", lambda e, i=i: (self.focus_set(), self._pick(i)))
+            lb.bind("<Enter>", lambda e, i=i: self._paint(hover=i))
+            lb.bind("<Leave>", lambda e: self._paint())
+            self.rows.append(lb)
+        for seq, d in (("<Up>", -1), ("<Down>", 1), ("<Prior>", -rows), ("<Next>", rows),
+                       ("<Home>", -10 ** 6), ("<End>", 10 ** 6)):
+            self.bind(seq, lambda e, d=d: (self._pick(max(0, min(len(self.rows) - 1, self.index + d))), "break")[1])
+        self.bind("<FocusIn>", lambda e: self.configure(bg=C["accent"]))
+        self.bind("<FocusOut>", lambda e: self.configure(bg=C["border"]))
         if value is not None:
             self.set_key(value, quiet=True)
+        self._paint()
+
+    def key(self):
+        return self.choices[self.index][0] if 0 <= self.index < len(self.choices) else None
+
+    def get(self):
+        return self.choices[self.index][1] if 0 <= self.index < len(self.choices) else ""
+
+    def current(self):
+        return self.index
+
+    def set_key(self, key, quiet=False):
+        for i, (k, _t) in enumerate(self.choices):
+            if k == key:
+                self._pick(i, quiet=quiet)
+                return
+
+    def _pick(self, i, quiet=False):
+        if not 0 <= i < len(self.rows):
+            return
+        self.index = i
+        self._paint()
+        if self.scroll is not None:
+            self.after_idle(lambda: self.scroll.see(self.rows[i]) if self.winfo_exists() else None)
+        if not quiet:
+            if self.on_change:
+                self.on_change()
+            self.event_generate("<<ComboboxSelected>>")
+
+    def _paint(self, hover=None):
+        for j, lb in enumerate(self.rows):
+            picked = j == self.index
+            lb.configure(bg=C["select"] if picked else (C["hover"] if j == hover else C["surface"]),
+                         fg=C["accent"] if picked else C["fg"])
 
 
 class InfoBar(tk.Frame):
