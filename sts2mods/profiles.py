@@ -16,18 +16,24 @@ def _safe(name):
     return re.sub(r"[^\w\- ]+", "_", name).strip() or "profile"
 
 
+def _sort_key(name):
+    """Alphabetical, ignoring case, with numbers in number order: "2" before "10"."""
+    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", name)]
+
+
 def list_profiles():
+    """Saved profile names, alphabetically."""
     if not os.path.isdir(PROFILE_DIR):
         return []
     out = []
-    for f in sorted(os.listdir(PROFILE_DIR)):
+    for f in os.listdir(PROFILE_DIR):
         if f.endswith(".json"):
             try:
                 with open(os.path.join(PROFILE_DIR, f), encoding="utf-8") as fh:
                     out.append(json.load(fh).get("name") or f[:-5])
             except (OSError, ValueError):
                 continue
-    return out
+    return sorted(out, key=_sort_key)
 
 
 def _path(name):
@@ -47,6 +53,47 @@ def save_profile(name, states, order, mods):
     }
     with open(_path(name), "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def profile_setup(data, mods, current_order):
+    """(states, order) that loading `data` produces for the installed `mods`. Installed mods
+    the profile doesn't list come out disabled, and keep their place after the profile's order."""
+    wanted = {m["id"]: m.get("enabled", True) for m in data.get("mods", []) if isinstance(m, dict)}
+    states = {mid: bool(wanted.get(mid, False)) for mid in mods}
+    order = [i for i in data.get("order", []) if i in mods]
+    order += [i for i in current_order if i not in order]
+    return states, order
+
+
+def matches(data, states, order, mods):
+    """True if the current setup is exactly what loading this profile would give."""
+    want_states, want_order = profile_setup(data, mods, order)
+    return want_states == {mid: bool(states.get(mid, True)) for mid in mods} and want_order == list(order)
+
+
+def _active_path():
+    return os.path.join(PROFILE_DIR, ".active")
+
+
+def get_active():
+    """Name of the profile last loaded or saved, or None."""
+    try:
+        with open(_active_path(), encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def set_active(name):
+    try:
+        if name:
+            os.makedirs(PROFILE_DIR, exist_ok=True)
+            with open(_active_path(), "w", encoding="utf-8") as f:
+                f.write(name)
+        elif os.path.exists(_active_path()):
+            os.remove(_active_path())
+    except OSError:
+        pass
 
 
 def load_profile(name):

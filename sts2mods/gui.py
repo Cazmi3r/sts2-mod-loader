@@ -734,6 +734,8 @@ class Window:
         self.state = State()
         self.rows = {}
         self.selected = None
+        self.profile_data = None     # {name: saved profile}, filled by refresh_profiles
+        self.active_profile = profiles.get_active()
         self.detail_gen = 0      # bumped whenever anything a details page shows may have changed
         self.visible_ids = []    # mod list rows in display order
         self.health_gen = 0
@@ -792,8 +794,10 @@ class Window:
         Pill(right, "Import mod list", self.compare_dialog,
              tooltip="Paste a friend's mod list code to see what differs and match their setup").pack(side="left", padx=(6, 0))
         tk.Frame(right, bg=C["border"], width=1, height=22).pack(side="left", padx=12)
-        self.profile = Select(right, [("", "Profiles…")], "", on_change=self._on_profile_chosen, width=13)
+        tk.Label(right, text="Profile", fg=C["dim"], bg=C["surface"]).pack(side="left", padx=(0, 6))
+        self.profile = Select(right, [("", "No profile")], "", on_change=self._on_profile_chosen, width=15)
         self.profile.pack(side="left")
+        Tooltip(self.profile, "The profile your current setup comes from. Pick another to load it.")
         Pill(right, "Save as…", self.save_profile_dialog, tooltip="Save the current setup as a profile") \
             .pack(side="left", padx=(6, 0))
         self.menu_btn = Pill(right, "•••", self._open_menu, "ghost", padx=12, tooltip="More")
@@ -1078,6 +1082,7 @@ class Window:
                 text=f"Unapplied changes: {', '.join(parts)}. They take effect next time the game starts.")
         self._bar(self.bar_pending, "x" if n else "")
         self.apply_btn.set_enabled(not self.running and st.settings is not None)
+        self.show_active_profile()
 
     def _bar(self, bar, text):
         if text:
@@ -1863,11 +1868,45 @@ class Window:
     # ---- profiles ------------------------------------------------------------------------
 
     def refresh_profiles(self):
-        self.profile.set_choices([("", "Profiles…")] + [(n, n) for n in profiles.list_profiles()], "")
+        data = {}
+        for name in profiles.list_profiles():
+            try:
+                data[name] = profiles.load_profile(name)
+            except (OSError, ValueError):
+                continue
+        self.profile_data = data
+        if self.active_profile not in data:
+            self._set_active_profile(None)
+        self.show_active_profile()
+
+    def _set_active_profile(self, name):
+        if name != self.active_profile:
+            self.active_profile = name
+            profiles.set_active(name)
+
+    def show_active_profile(self):
+        """Put the active profile in the dropdown: its name when the current setup (including
+        unapplied changes) is exactly that profile, "Name (changed)" after edits, else "No profile"."""
+        if self.profile_data is None:
+            return
+        st, data = self.state, self.profile_data
+        names = list(data)
+        states = st.states()
+        candidates = ([self.active_profile] if self.active_profile in data else []) + names
+        match = next((n for n in candidates if profiles.matches(data[n], states, st.order, st.mods)), None)
+        if match:
+            self._set_active_profile(match)
+            self.profile.set_choices([(n, n) for n in names], match)
+        elif self.active_profile:
+            self.profile.set_choices([("", f"{self.active_profile} (changed)")] + [(n, n) for n in names], "")
+        else:
+            self.profile.set_choices([("", "No profile" if names else "No profiles yet")] +
+                                     [(n, n) for n in names], "")
 
     def _on_profile_chosen(self):
         name = self.profile.key()
         if not name:
+            self.show_active_profile()
             return
         try:
             data = profiles.load_profile(name)
@@ -1881,12 +1920,12 @@ class Window:
         order = [i for i in data.get("order", []) if i in st.mods]
         st.order = order + [i for i in st.order if i not in order]
         missing = [m for m in data.get("mods", []) if m.get("enabled") and m["id"] not in st.mods]
+        self._set_active_profile(name)
         self.refresh_rows()
         msg = f"Loaded profile “{name}”. Review, then Apply."
         if missing:
             msg += " Not installed: " + ", ".join(m.get("name", m["id"]) for m in missing)
         self.toast(msg)
-        self.root.after_idle(self.refresh_profiles)
 
     def save_profile_dialog(self):
         dlg = Dialog(self.root, "Save profile")
@@ -1900,6 +1939,17 @@ class Window:
         dlg.button("Cancel", 0)
         typed = {}
         var.trace_add("write", lambda *_: typed.update(text=var.get()))
+        if self.active_profile:
+            # Start from the active profile, so Save updates it. The name is selected:
+            # typing replaces it to save a new profile instead.
+            var.set(self.active_profile)
+            entry.select_range(0, "end")
+            entry.icursor("end")
+            tk.Label(dlg.body, text=f"Keep the name to update “{self.active_profile}”, or type a new one.",
+                     fg=C["dim"], bg=dlg.body.cget("bg"), font=F["small"], anchor="w") \
+                .pack(fill="x", pady=(6, 0))
+        # run() focuses the dialog window itself; put the cursor back in the name box, name selected
+        dlg.after(60, lambda: (entry.focus_force(), entry.select_range(0, "end"), entry.icursor("end")))
         if dlg.run() != 1:
             return
         text = typed.get("text", "").strip()
@@ -1907,6 +1957,7 @@ class Window:
             return
         st = self.state
         profiles.save_profile(text, st.states(), st.order, st.mods)
+        self._set_active_profile(text)
         self.refresh_profiles()
         self.toast(f"Saved profile “{text}”.")
 
@@ -1925,7 +1976,10 @@ class Window:
         chosen = {}
         sel.bind("<<ComboboxSelected>>", lambda e: chosen.update(k=sel.key()), add="+")
         if dlg.run() == 1:
-            profiles.delete_profile(chosen.get("k", names[0]))
+            gone = chosen.get("k", names[0])
+            profiles.delete_profile(gone)
+            if gone == self.active_profile:
+                self._set_active_profile(None)
             self.refresh_profiles()
 
     # ---- co-op ---------------------------------------------------------------------------

@@ -271,6 +271,42 @@ class TestProfiles(Sandbox):
         code = profiles.share_code({"Lib": True, "Char": False, "Mine": True}, mods, self.game)
         self.assertEqual({m["workshop_id"] for m in profiles.parse_share_code(code)["mods"]}, {"1", "3"})
 
+    def test_profiles_are_alphabetical(self):
+        self.add_workshop_mod("1", "Lib")
+        mods = mods_mod.scan(self.game)
+        for name in ("friend", "Temp", "10", "2", "Default", "co-op 12", "Co-op 3"):
+            profiles.save_profile(name, {"Lib": True}, ["Lib"], mods)
+        self.assertEqual(profiles.list_profiles(),
+                         ["2", "10", "Co-op 3", "co-op 12", "Default", "friend", "Temp"])
+
+    def test_active_profile_matching(self):
+        self.add_workshop_mod("1", "Lib")
+        self.add_workshop_mod("2", "Char")
+        self.add_workshop_mod("3", "Mine")
+        mods = mods_mod.scan(self.game)
+        order = ["Lib", "Char", "Mine"]
+        profiles.save_profile("Solo", {"Lib": True, "Char": False, "Mine": True}, order, mods)
+        solo = profiles.load_profile("Solo")
+        self.assertTrue(profiles.matches(solo, {"Lib": True, "Char": False, "Mine": True}, order, mods))
+        self.assertFalse(profiles.matches(solo, {"Lib": True, "Char": True, "Mine": True}, order, mods))
+        self.assertFalse(profiles.matches(solo, {"Lib": True, "Char": False, "Mine": True},
+                                          ["Char", "Lib", "Mine"], mods))
+        # a mod installed after saving comes out disabled when the profile loads
+        self.add_workshop_mod("4", "New")
+        mods = mods_mod.scan(self.game)
+        states, new_order = profiles.profile_setup(solo, mods, order + ["New"])
+        self.assertFalse(states["New"])
+        self.assertEqual(new_order, order + ["New"])
+        self.assertFalse(profiles.matches(solo, {"Lib": True, "Char": False, "Mine": True, "New": True},
+                                          order + ["New"], mods))
+        # the active name is remembered, and never listed as a profile
+        self.assertIsNone(profiles.get_active())
+        profiles.set_active("Solo")
+        self.assertEqual(profiles.get_active(), "Solo")
+        self.assertEqual(profiles.list_profiles(), ["Solo"])
+        profiles.set_active(None)
+        self.assertIsNone(profiles.get_active())
+
 
 class TestShareCode(Sandbox):
     def test_roundtrip_inside_chat_message(self):
