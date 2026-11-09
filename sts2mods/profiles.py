@@ -1,13 +1,15 @@
 """Named mod setups ("profiles") and mod-list export/compare for co-op."""
 
+import base64
 import json
 import os
 import re
 import time
+import zlib
 
-from . import __version__
+from . import __version__, osenv
 
-PROFILE_DIR = os.path.expanduser("~/.config/sts2-mod-loader/profiles")
+PROFILE_DIR = os.path.join(osenv.config_dir(), "profiles")
 EXPORT_FORMAT = "sts2-mod-loader/modlist-1"
 
 
@@ -60,8 +62,9 @@ def delete_profile(name):
         pass
 
 
-def export_modlist(path, states, mods, game):
-    data = {
+def modlist_data(states, mods, game):
+    """The enabled mods plus game version/branch: what a friend needs to compare setups."""
+    return {
         "format": EXPORT_FORMAT,
         "tool": f"sts2-mod-loader {__version__}",
         "exported": time.strftime("%Y-%m-%d %H:%M"),
@@ -72,8 +75,11 @@ def export_modlist(path, states, mods, game):
                  for m in sorted(mods.values(), key=lambda m: m.name.lower())
                  if states.get(m.id, True)],
     }
+
+
+def export_modlist(path, states, mods, game):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(modlist_data(states, mods, game), f, indent=2, ensure_ascii=False)
 
 
 def import_modlist(path):
@@ -82,6 +88,54 @@ def import_modlist(path):
     if not isinstance(data, dict) or not isinstance(data.get("mods"), list):
         raise ValueError("This file isn't a mod list exported by STS2 Mod Loader.")
     return data
+
+
+# ---- share codes: the same mod list as one line of text to paste in a chat ------------------
+
+SHARE_PREFIX = "STS2MODS1:"
+RE_SHARE = re.compile(re.escape(SHARE_PREFIX) + r"([A-Za-z0-9_-]+)")
+
+
+def share_code(states, mods, game):
+    """A compact, paste-able code for the enabled mods. Workshop mods are sent without their
+    names (the receiver looks those up on the Workshop), which keeps the code short."""
+    data = modlist_data(states, mods, game)
+    rows = []
+    for m in data["mods"]:
+        row = [m["id"], m["version"] or "", m["workshop_id"] or "", 1 if m["affects_gameplay"] else 0]
+        if not m["workshop_id"] and m["name"] != m["id"]:
+            row.append(m["name"])
+        rows.append(row)
+    compact = {"g": data["game_version"], "b": data["branch"], "m": rows}
+    raw = json.dumps(compact, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return SHARE_PREFIX + base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip("=")
+
+
+def find_share_code(text):
+    m = RE_SHARE.search(text or "")
+    return m.group(0) if m else None
+
+
+def parse_share_code(text):
+    """Accepts a code, or any text containing one (e.g. a pasted chat message). Returns the same
+    structure as import_modlist. Raises ValueError for anything else."""
+    m = RE_SHARE.search(text or "")
+    if not m:
+        raise ValueError("That doesn't contain a mod list code. Codes start with " + SHARE_PREFIX)
+    body = m.group(1)
+    try:
+        raw = zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        compact = json.loads(raw.decode("utf-8"))
+        mods = []
+        for row in compact["m"]:
+            mod_id, version, wid, gameplay = row[:4]
+            mods.append({"id": mod_id, "name": row[4] if len(row) > 4 else mod_id, "version": version,
+                         "workshop_id": wid or None, "affects_gameplay": bool(gameplay)})
+    except (ValueError, KeyError, TypeError, IndexError, zlib.error) as e:
+        raise ValueError("That mod list code is damaged or incomplete. Ask for it again and copy "
+                         "the whole line.") from e
+    return {"format": EXPORT_FORMAT, "game_version": compact.get("g"), "branch": compact.get("b"),
+            "mods": mods}
 
 
 def compare(theirs, states, mods, game):

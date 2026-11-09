@@ -8,10 +8,10 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import APP_ID
+from . import APP_ID, osenv
 
 API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-CACHE_DIR = os.path.expanduser("~/.cache/sts2-mod-loader")
+CACHE_DIR = osenv.cache_dir()
 CACHE_PATH = os.path.join(CACHE_DIR, "workshop.json")
 PREVIEW_DIR = os.path.join(CACHE_DIR, "previews")
 TTL = 6 * 3600

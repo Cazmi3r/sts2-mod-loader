@@ -13,6 +13,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from . import osenv
+from . import mods as mods_mod
 from .mods import ERROR, INFO, SEVERITY_RANK, WARN, Issue
 
 FRAMEWORK_PREFIXES = ("MegaCrit", "System", "Godot", "HarmonyLib", "MonoMod", "Microsoft",
@@ -77,10 +79,10 @@ class Attributor:
                 self.dll_stems.setdefault(stem.split(".")[0], mid)
 
     def by_path(self, path):
-        path = os.path.realpath(path)
+        path = os.path.normcase(os.path.realpath(path.strip()))
         best = None
         for mid, mod in self.mods.items():
-            d = os.path.realpath(mod.dir)
+            d = os.path.normcase(os.path.realpath(mod.dir))
             if path == d or path.startswith(d + os.sep):
                 if best is None or len(d) > len(os.path.realpath(self.mods[best].dir)):
                     best = mid
@@ -344,7 +346,7 @@ def parse_log(path, mods, attributor):
             last_error = (mod_id, nxt, "path-too-long")
             _add(session, mod_id, Issue(
                 ERROR, "File names too long for your file system (writes failing)",
-                _short(f"{summary[0]}: {summary[1]}", 300), key="path-too-long"))
+                _short(f"{summary[0]}: {summary[1]}", 900), key="path-too-long"))
         elif "ContentPack" in line and "Failed" in line:
             _add(session, mod_id, Issue(
                 ERROR, "Some of its content (cards, relics, potions…) failed to register",
@@ -376,7 +378,7 @@ def log_files(logs_dir):
     return sorted(files, key=os.path.getmtime, reverse=True)
 
 
-HISTORY_PATH = os.path.expanduser("~/.local/share/sts2-mod-loader/history.json")
+HISTORY_PATH = os.path.join(osenv.data_dir(), "history.json")
 
 # Overall per-mod status, worst first.
 S_ERROR, S_WARN, S_STALE, S_OK, S_UNTESTED = "error", "warn", "stale", "ok", "untested"
@@ -445,8 +447,10 @@ def api_issues(result, game_version_text):
     return out
 
 
-def analyze(mods, logs_dir, live=False, use_history=True, api_results=None, game_version_text="?"):
-    """live=True means the newest log belongs to a session that is still running."""
+def analyze(mods, logs_dir, live=False, use_history=True, api_results=None, game_version_text="?",
+            game=None):
+    """live=True means the newest log belongs to a session that is still running. game (optional)
+    lets long-file-name errors offer a fix."""
     attributor = Attributor(mods)
     sessions = [parse_log(p, mods, attributor) for p in log_files(logs_dir)]
     history = _load_history() if use_history else {}
@@ -489,11 +493,15 @@ def analyze(mods, logs_dir, live=False, use_history=True, api_results=None, game
             tested[mod_id] = (time.strftime("%b %d %H:%M", time.localtime(h.get("session_time", 0))),
                               h.get("session_time", 0))
 
-        # Log errors about long paths are history once the file system problem is fixed.
-        if not any(i.key == "ritsulib-cache" for i in mod.static_issues):
-            for iss in issues:
-                if iss.key == "path-too-long" and not iss.stale:
-                    iss.stale, iss.stale_note = True, "the file system problem behind this has been fixed"
+        # File names too long: offer to move the data folder off the encrypted file system, or
+        # mark the error as history once that's done.
+        fs_fix = mods_mod.relocation_fix(game) if game else None
+        for iss in issues:
+            if iss.key == "path-too-long" and not iss.stale:
+                if fs_fix:
+                    iss.fix = fs_fix
+                elif game and game.user_data:
+                    iss.stale, iss.stale_note = True, "the game's data folder now allows long file names"
         # A crash that followed an error we now consider fixed is probably fixed too.
         crash_cause = (session.crash_key if session else None)
         for iss in issues:
@@ -521,6 +529,9 @@ def analyze(mods, logs_dir, live=False, use_history=True, api_results=None, game
     if history_changed:
         _save_history(history)
     global_issues = sessions[0].global_issues if sessions else []
+    fs_issue = mods_mod.filesystem_issue(game) if game else None
+    if fs_issue:
+        global_issues = [fs_issue] + list(global_issues)
     return HealthReport(by_mod=by_mod, status=status, tested=tested,
                         global_issues=_dedupe(global_issues), sessions=sessions)
 

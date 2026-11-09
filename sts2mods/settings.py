@@ -6,9 +6,9 @@ import os
 import shutil
 import time
 
-from . import game as game_mod
+from . import game as game_mod, osenv
 
-BACKUP_DIR = os.path.expanduser("~/.local/share/sts2-mod-loader/backups")
+BACKUP_DIR = os.path.join(osenv.data_dir(), "backups")
 KEEP_BACKUPS = 30
 
 

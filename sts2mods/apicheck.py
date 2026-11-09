@@ -13,10 +13,10 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from . import metadata as md
+from . import metadata as md, osenv
 from .game import parse_version
 
-CACHE_PATH = os.path.expanduser("~/.cache/sts2-mod-loader/apicheck.json")
+CACHE_PATH = os.path.join(osenv.cache_dir(), "apicheck.json")
 CACHE_VERSION = 3
 VERSION_DIR = re.compile(r"^[a-z]?v?(\d+\.\d+(?:\.\d+)?)$", re.I)
 VARIANT_SUFFIX = re.compile(r"\.(stable|beta\d*|public|legacy|v?\d+(?:[._]\d+)*)$", re.I)
@@ -193,13 +193,26 @@ class ModApiResult:
     error: str = ""
 
 
+def _find_game_dll(game):
+    """The game's own sts2.dll: data_sts2_<platform>_<arch>/sts2.dll on Linux and Windows,
+    somewhere inside the .app bundle on macOS. The mods folder is skipped."""
+    if not game.install_dir or not os.path.isdir(game.install_dir):
+        return None
+    for name in ("data_sts2_linuxbsd_x86_64", "data_sts2_windows_x86_64"):
+        p = os.path.join(game.install_dir, name, "sts2.dll")
+        if os.path.exists(p):
+            return p
+    mods_dir = os.path.normcase(os.path.realpath(game.mods_dir)) if game.mods_dir else None
+    for dp, dirs, fs in os.walk(game.install_dir):
+        dirs[:] = [d for d in dirs if os.path.normcase(os.path.realpath(os.path.join(dp, d))) != mods_dir]
+        if "sts2.dll" in fs:
+            return os.path.join(dp, "sts2.dll")
+    return None
+
+
 def check_mods(mods, game):
     """Return {mod_id: ModApiResult}. Results are cached by file fingerprints."""
-    sts2_path = os.path.join(game.install_dir or "", f"data_sts2_linuxbsd_x86_64", "sts2.dll")
-    if not os.path.exists(sts2_path):
-        hits = [os.path.join(dp, f) for dp, _, fs in os.walk(game.install_dir or "/nonexistent")
-                for f in fs if f == "sts2.dll"]
-        sts2_path = hits[0] if hits else None
+    sts2_path = _find_game_dll(game)
     if not sts2_path:
         return {}
 
