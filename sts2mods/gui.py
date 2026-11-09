@@ -216,9 +216,10 @@ class State:
 class Row(tk.Frame):
     """A selectable list row with hover and selection colors."""
 
-    def __init__(self, parent, on_select):
+    def __init__(self, parent, on_select, on_drag=None):
         super().__init__(parent, bg=C["surface"], cursor="hand2")
         self.on_select, self.selected, self.hovered = on_select, False, False
+        self.on_drag = on_drag        # on_drag(kind, event) with kind press / motion / release
         self.stripe = tk.Frame(self, bg=C["surface"], width=3)
         self.stripe.pack(side="left", fill="y")
         self.inner = tk.Frame(self, bg=C["surface"], padx=10, pady=8)
@@ -234,6 +235,10 @@ class Row(tk.Frame):
             w.bind("<Button-1>", lambda e: self.on_select(), add="+")
             w.bind("<Enter>", lambda e: self._hover(True), add="+")
             w.bind("<Leave>", lambda e: self.after_idle(self._check_leave), add="+")
+            if self.on_drag:
+                w.bind("<ButtonPress-1>", lambda e: self.on_drag("press", e), add="+")
+                w.bind("<B1-Motion>", lambda e: self.on_drag("motion", e), add="+")
+                w.bind("<ButtonRelease-1>", lambda e: self.on_drag("release", e), add="+")
 
     def _descendants(self, w):
         out = []
@@ -372,7 +377,7 @@ class Details:
 
 class ResultRow(Row):
     def __init__(self, page, parent, wid):
-        super().__init__(parent, lambda: page.select(wid))
+        super().__init__(parent, lambda: (page.list.canvas.focus_set(), page.select(wid)))
         self.page, self.wid, self.photo = page, wid, None
         self.blank = tk.PhotoImage(width=52, height=52)
         self.thumb = tk.Label(self.inner, image=self.blank, bg=C["surface2"], bd=0)
@@ -661,8 +666,11 @@ class BrowsePage(tk.Frame):
 
 class ModRow(Row):
     def __init__(self, win, parent, mod_id):
-        super().__init__(parent, lambda: win.select(mod_id))
+        super().__init__(parent, lambda: win.select(mod_id, focus_list=True),
+                         on_drag=lambda kind, e: win.drag_event(mod_id, kind, e))
         self.win, self.mod_id = win, mod_id
+        self.grip = tk.Label(self.inner, text="≡", font=F["dot"], fg=C["faint"], bg=C["surface"],
+                             cursor="sb_v_double_arrow", padx=2)
         self.check = Toggle(self.inner, command=lambda v: win.toggle_mod(mod_id, v),
                             tooltip="Enable or disable this mod")
         self.check.pack(side="left", padx=(0, 10))
@@ -685,7 +693,14 @@ class ModRow(Row):
         status = st.status(self.mod_id)
         self.dot.configure(text=STATUS_DOT[status], fg=status_color(status))
         self.name.configure(text=mod.name, fg=C["fg"] if on else C["faint"])
+        by_order = self.win.sort.key() == "order"
+        if by_order and not self.grip.winfo_manager():
+            self.grip.pack(side="left", padx=(0, 6), before=self.check)
+        elif not by_order and self.grip.winfo_manager():
+            self.grip.pack_forget()
         parts = [f"v{clean_version(mod.version)}", mod.source_label, human_size(mod.size)]
+        if by_order and self.mod_id in st.order:
+            parts.insert(0, f"#{st.order.index(self.mod_id) + 1}")
         if mod.author:
             parts.append(f"by {mod.author}")
         self.sub.configure(text=" · ".join(parts))
@@ -871,6 +886,88 @@ class Window:
         for seq, fn in ((f"<{MOD}-f>", self.focus_search), (f"<{MOD}-r>", self.reload), ("<F5>", self.reload),
                         (f"<{MOD}-s>", self.apply)):
             r.bind_all(seq, lambda e, fn=fn: (fn(), "break")[1])
+        # List navigation. Same keys on every system.
+        nav = {"<Up>": lambda: self.step_selection(-1), "<Down>": lambda: self.step_selection(1),
+               "<Prior>": lambda: self.step_selection(-10), "<Next>": lambda: self.step_selection(10),
+               "<Home>": lambda: self.step_selection(-10 ** 6), "<End>": lambda: self.step_selection(10 ** 6),
+               "<space>": self.key_toggle, "<Return>": self.key_apply, "<KP_Enter>": self.key_apply,
+               "<Escape>": self.key_escape}
+        for seq, fn in nav.items():
+            r.bind_all(seq, lambda e, fn=fn, seq=seq: self._key(e, seq, fn), add="+")
+        # Option on macOS is Alt elsewhere: Alt+Up/Down moves the selected mod in the load order.
+        # "Option" is bound on macOS only: to Tk it means the Mod2 modifier, which on Linux is
+        # Num Lock, so there it would turn plain Up/Down into "move this mod" whenever Num Lock is on.
+        for mod_key in (("Alt", "Option") if osenv.IS_MAC else ("Alt",)):
+            for seq, d in ((f"<{mod_key}-Up>", -1), (f"<{mod_key}-Down>", 1)):
+                try:
+                    r.bind_all(seq, lambda e, d=d: self._key(e, "move", lambda: self.key_move(d)))
+                except tk.TclError:
+                    pass
+
+    def _key(self, e, seq, fn):
+        """Run a list shortcut unless the key belongs to whatever has focus (typing in a box,
+        an open dropdown, a dialog)."""
+        w = self.root.focus_get()
+        if w is None or w.winfo_toplevel() is not self.root or self.root.grab_current() not in (None, self.root):
+            return None
+        cls = w.winfo_class()
+        if cls in ("TCombobox", "Text", "Listbox"):
+            return None
+        if cls in ("TEntry", "Entry"):
+            # From a search box only Down (into the list) applies; the box handles Escape itself.
+            if seq != "<Down>":
+                return None
+        fn()
+        return "break"
+
+    def _nav_target(self):
+        """(ids in display order, current id, select function, list ScrollFrame, rows) for the
+        page that's showing."""
+        if self.page == "browse":
+            b = self.browse
+            return list(b.order), b.selected, b.select, b.list, b.rows
+        return list(self.visible_ids), self.selected, self.select, self.list, self.rows
+
+    def step_selection(self, delta):
+        ids, cur, select, scroll, rows = self._nav_target()
+        if not ids:
+            return
+        if cur in ids:
+            i = max(0, min(len(ids) - 1, ids.index(cur) + delta))
+        else:
+            i = 0 if delta > 0 else len(ids) - 1
+        if ids[i] != cur:
+            select(ids[i])
+        scroll.canvas.focus_set()          # keep the keys working on the list, not the search box
+        if ids[i] in rows:
+            scroll.see(rows[ids[i]])
+
+    def key_toggle(self):
+        if self.page == "installed" and self.selected in self.state.mods:
+            self.toggle_mod(self.selected, not self.state.enabled(self.selected))
+
+    def key_apply(self):
+        if self.page == "installed" and self.state.change_count() and not self.running:
+            self.apply()
+
+    def key_escape(self):
+        search = self.browse.search if self.page == "browse" else self.search
+        if search.value():
+            search.set("")
+            if self.page == "installed":
+                self.refilter()
+            return
+        if self.page == "installed" and self.selected:
+            if self.selected in self.rows:
+                self.rows[self.selected].set_selected(False)
+            self.selected = None
+            self.show_overview()
+
+    def key_move(self, delta):
+        if self.page == "installed" and self.selected in self.state.order:
+            self.move(self.selected, delta)
+            if self.selected in self.rows:
+                self.list.see(self.rows[self.selected])
 
     def focus_search(self):
         (self.browse.search if self.page == "browse" else self.search).focus_set()
@@ -1200,6 +1297,15 @@ class Window:
     def refilter(self):
         if not hasattr(self, "rows"):
             return
+        sort = self.sort.key()
+        if sort != getattr(self, "_last_sort", None):
+            self._last_sort = sort
+            for r in self.rows.values():
+                r.refresh()
+        elif sort == "order" and self.state.order != getattr(self, "_last_order", None):
+            for r in self.rows.values():      # positions shifted
+                r.refresh()
+        self._last_order = list(self.state.order)
         ids = sorted((m for m in self.rows if self._visible(m)), key=self._sort_key)
         if ids == self.visible_ids and all(self.rows[m].winfo_manager() for m in ids):
             return                   # nothing moved: skip re-packing every row
@@ -1214,7 +1320,9 @@ class Window:
 
     # ---- details pane --------------------------------------------------------------------
 
-    def select(self, mod_id):
+    def select(self, mod_id, focus_list=False):
+        if focus_list:
+            self.list.canvas.focus_set()
         if self.selected in self.rows:
             self.rows[self.selected].set_selected(False)
         self.selected = mod_id
@@ -1349,8 +1457,11 @@ class Window:
             if steamugc.available(st.game):
                 Pill(btns, "Unsubscribe", lambda: self.unsubscribe(mod.workshop_id, mod.name), "danger") \
                     .pack(side="left", padx=(0, 8))
-        Pill(btns, "▼", lambda: self.move(mod_id, 1), padx=10, tooltip="Load later").pack(side="right")
-        Pill(btns, "▲", lambda: self.move(mod_id, -1), padx=10, tooltip="Load earlier") \
+        alt = "Option" if osenv.IS_MAC else "Alt"
+        Pill(btns, "▼", lambda: self.move(mod_id, 1), padx=10,
+             tooltip=f"Load later ({alt}+↓). Or sort by load order and drag it in the list.").pack(side="right")
+        Pill(btns, "▲", lambda: self.move(mod_id, -1), padx=10,
+             tooltip=f"Load earlier ({alt}+↑). Or sort by load order and drag it in the list.") \
             .pack(side="right", padx=(0, 4))
         tk.Label(btns, text="Load order", fg=C["dim"], bg=C["surface"]).pack(side="right", padx=(0, 8))
 
@@ -1523,6 +1634,106 @@ class Window:
                 self.sort.set_key("order", quiet=True)
                 self.toast("Sorted by load order. Note: the game always loads a mod's requirements before it.")
             self.refresh_rows([mod_id, order[i]])
+
+    # ---- drag to reorder ------------------------------------------------------------------
+
+    DRAG_START_PX = 8       # how far the pointer must move before a press becomes a drag
+    DRAG_EDGE_PX = 36       # pointer this close to the list's top/bottom edge scrolls it
+
+    def drag_event(self, mod_id, kind, e):
+        d = getattr(self, "_drag", None)
+        if kind == "press":
+            self._drag = {"id": mod_id, "y0": e.y_root, "active": False, "index": None}
+            return
+        if not d or d["id"] != mod_id:
+            return
+        if kind == "motion":
+            if not d["active"]:
+                if abs(e.y_root - d["y0"]) < self.DRAG_START_PX:
+                    return
+                if self.sort.key() != "order":
+                    self._drag = None
+                    self.toast("To drag mods into a new load order, choose Sort: Load order.")
+                    return
+                self._drag_begin(d)
+            self._drag_update(e.y_root)
+        elif kind == "release":
+            self._drag = None
+            if d["active"]:
+                self._drag_end(d)
+
+    def _drag_begin(self, d):
+        d["active"] = True
+        d["line"] = tk.Frame(self.list.body, height=3, bg=C["accent"])
+        row = self.rows.get(d["id"])
+        if row:
+            row.configure(cursor="sb_v_double_arrow")
+            row.name.configure(fg=C["faint"])
+        d["tick"] = self.root.after(30, self._drag_tick)
+
+    def _drag_index(self, y_root):
+        """Insertion point among the visible rows for a pointer at screen y."""
+        y = y_root - self.list.body.winfo_rooty()
+        for i, mid in enumerate(self.visible_ids):
+            r = self.rows[mid]
+            if y < r.winfo_y() + r.winfo_height() / 2:
+                return i, r.winfo_y()
+        last = self.rows[self.visible_ids[-1]] if self.visible_ids else None
+        return len(self.visible_ids), (last.winfo_y() + last.winfo_height()) if last else 0
+
+    def _drag_update(self, y_root):
+        d = self._drag
+        if not d or not self.visible_ids:
+            return
+        d["index"], y = self._drag_index(y_root)
+        d["line"].place(x=0, y=max(0, y - 1), relwidth=1)
+        d["line"].lift()
+
+    def _drag_tick(self):
+        """While dragging near the top or bottom edge, keep scrolling the list."""
+        d = getattr(self, "_drag", None)
+        if not d or not d["active"]:
+            return
+        y_root = self.root.winfo_pointery()
+        cy = y_root - self.list.canvas.winfo_rooty()
+        h = self.list.canvas.winfo_height()
+        if cy < self.DRAG_EDGE_PX:
+            self.list.scroll(-12)
+        elif cy > h - self.DRAG_EDGE_PX:
+            self.list.scroll(12)
+        self._drag_update(y_root)
+        d["tick"] = self.root.after(30, self._drag_tick)
+
+    def _drag_end(self, d):
+        if d.get("tick"):
+            self.root.after_cancel(d["tick"])
+        d["line"].destroy()
+        mod_id, i, ids = d["id"], d["index"], list(self.visible_ids)
+        row = self.rows.get(mod_id)
+        if row:
+            row.configure(cursor="hand2")
+        if i is None or mod_id not in ids:
+            self.refresh_rows([mod_id])
+            return
+        here = ids.index(mod_id)
+        if i in (here, here + 1):              # dropped where it already was
+            self.refresh_rows([mod_id])
+            return
+        self.reorder(mod_id, ids[i] if i < len(ids) else None, after=ids[-1] if i >= len(ids) else None)
+
+    def reorder(self, mod_id, before=None, after=None):
+        """Move mod_id in the load order to just before `before` (or just after `after`)."""
+        order = self.state.order
+        order.remove(mod_id)
+        if before is not None:
+            order.insert(order.index(before), mod_id)
+        elif after is not None:
+            order.insert(order.index(after) + 1, mod_id)
+        else:
+            order.append(mod_id)
+        self.refresh_rows([mod_id])
+        if mod_id in self.rows:
+            self.list.see(self.rows[mod_id])
 
     def revert(self):
         self.state.pending.clear()

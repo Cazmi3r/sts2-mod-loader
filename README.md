@@ -63,6 +63,11 @@ folder in Applications once. The app tells you if this is needed.
   and every write makes a backup you can restore from the menu.
 - **Profiles.** Save and load named setups ("Solo", "Co-op with Sam"), including load
   order.
+- **Load order.** Sort by load order and drag mods up or down the list, or use the ▲▼
+  buttons on a mod (Alt+↑/↓, Option+↑/↓ on macOS).
+- **Keyboard.** ↑/↓ move through the list (Page Up/Down, Home/End jump), Space enables or
+  disables the selected mod, Enter applies, Esc clears the search or the selection,
+  Ctrl+F (⌘F) searches, Ctrl+S (⌘S) applies, F5 rescans.
 - **Co-op compare.** *Copy my mod list code* puts one line of text on your clipboard
   (`STS2:…`, about 100 characters for 8 mods, under 500 for 60). Paste it in Discord or wherever; your friend
   opens *Compare with a friend's code* (it picks the code up from the clipboard) to see
