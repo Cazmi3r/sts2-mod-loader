@@ -100,11 +100,15 @@ class TestScan(Sandbox):
         keys = lambda m: {i.key for i in mods[m].static_issues}  # noqa: E731
         self.assertIn("dep-missing-Missing", keys("Char"))
         self.assertNotIn("dep-missing-Lib", keys("Char"))
-        self.assertIn("case-pck", keys("CaseBug"))
         self.assertIn("min-game", keys("Future"))
-        fix = next(i.fix for i in mods["CaseBug"].static_issues if i.fix)
-        self.assertEqual(fix[0], "symlink")
-        self.assertEqual(fix[1], "Casebug.pck")
+        if os.path.exists(os.path.join(self.tmp, "GAME")):
+            # Windows/macOS ignore capitalization: the game finds the file, so nothing to report.
+            self.assertNotIn("case-pck", keys("CaseBug"))
+        else:
+            self.assertIn("case-pck", keys("CaseBug"))
+            fix = next(i.fix for i in mods["CaseBug"].static_issues if i.fix)
+            self.assertEqual(fix[0], "symlink")
+            self.assertEqual(fix[1], "Casebug.pck")
 
     def test_duplicate_prefers_higher_version(self):
         self.add_workshop_mod("1", "Dup", version="1.0.0")
