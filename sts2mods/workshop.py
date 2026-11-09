@@ -8,10 +8,10 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import APP_ID
+from . import APP_ID, osenv
 
 API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-CACHE_DIR = os.path.expanduser("~/.cache/sts2-mod-loader")
+CACHE_DIR = osenv.cache_dir()
 CACHE_PATH = os.path.join(CACHE_DIR, "workshop.json")
 PREVIEW_DIR = os.path.join(CACHE_DIR, "previews")
 TTL = 6 * 3600
@@ -124,6 +124,24 @@ def browse(query="", sort="trend", page=1):
     except (OSError, ValueError):
         return None
     return parse_browse(html)
+
+
+# Words that show up in titles of any language and say nothing about whether a reader of
+# English can use the mod ("【CN】角色 Mod Beta" is still a Chinese listing).
+_FILLER = re.compile(r"\b(?:mods?|beta|alpha|test|cn|en|zh|jp|kr|sts2?|v?\d[\w.]*)\b", re.I)
+MIN_TITLE_LETTERS = 6
+
+
+def looks_english(details):
+    """Whether to show a browse result to an English reader. Bilingual titles count: one Chinese
+    character carries about a word, so "Better Map 更好的地图模组" would fail a plain letter ratio
+    even though the English half is readable. A title with real English words (at least
+    MIN_TITLE_LETTERS letters once filler like "Mod" or "Beta" is removed) passes; otherwise the
+    letter ratio of title + description decides."""
+    title = _FILLER.sub(" ", strip_bbcode(details.get("title", "")))
+    if sum(c.isascii() and c.isalpha() for c in title) >= MIN_TITLE_LETTERS:
+        return True
+    return english_ratio(details) >= MIN_ENGLISH
 
 
 def english_ratio(details):

@@ -13,6 +13,14 @@ if [ "$1" = "--uninstall" ]; then
     exit 0
 fi
 
+if ! python3 -c "import tkinter" 2>/dev/null; then
+    echo "Python's Tk support is missing. Install it first:"
+    echo "  sudo apt install python3-tk      (Mint, Ubuntu, Debian)"
+    echo "  sudo dnf install python3-tkinter (Fedora)"
+    echo "  sudo pacman -S tk                (Arch)"
+    exit 1
+fi
+
 mkdir -p "$(dirname "$DESKTOP")" "$(dirname "$BIN")"
 ln -sf "$HERE/sts2-mod-loader" "$BIN"
 cat > "$DESKTOP" <<DESK

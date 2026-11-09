@@ -4,22 +4,10 @@ import glob
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 
-from . import APP_ID, vdf
+from . import APP_ID, osenv, vdf
 
-HOME = os.path.expanduser("~")
-STEAM_ROOT_CANDIDATES = [
-    "~/.steam/steam",
-    "~/.steam/debian-installation",
-    "~/.local/share/Steam",
-    "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
-]
-USER_DATA_CANDIDATES = [
-    "~/.local/share/SlayTheSpire2",
-    "~/.var/app/com.valvesoftware.Steam/.local/share/SlayTheSpire2",
-]
 PROCESS_NAME = "SlayTheSpire2"
 
 
@@ -44,7 +32,7 @@ class Game:
     install_dir: str = None
     workshop_dir: str = None     # .../workshop/content/<appid>
     workshop_acf: str = None
-    user_data: str = None        # ~/.local/share/SlayTheSpire2
+    user_data: str = None        # the game's user:// folder (settings.save, logs)
     settings_path: str = None    # active settings.save
     version: tuple = None
     version_text: str = "?"
@@ -53,7 +41,8 @@ class Game:
 
     @property
     def mods_dir(self):
-        return os.path.join(self.install_dir, "mods") if self.install_dir else None
+        exe_dir = osenv.game_exe_dir(self.install_dir)
+        return os.path.join(exe_dir, "mods") if exe_dir else None
 
     @property
     def logs_dir(self):
@@ -81,10 +70,21 @@ def _library_paths(steam_root):
     return out
 
 
+def _release_info_path(install_dir):
+    """release_info.json sits next to the executable; on macOS that may be inside the .app."""
+    exe_dir = osenv.game_exe_dir(install_dir)
+    candidates = [os.path.join(install_dir, "release_info.json"),
+                  os.path.join(exe_dir, "release_info.json"),
+                  os.path.join(os.path.dirname(exe_dir), "Resources", "release_info.json")]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
 def locate():
     game = Game()
-    for cand in STEAM_ROOT_CANDIDATES:
-        root = os.path.expanduser(cand)
+    for root in osenv.steam_roots():
         if not os.path.isdir(root):
             continue
         for lib in _library_paths(root):
@@ -109,15 +109,14 @@ def locate():
         game.problems.append("Could not find Slay the Spire 2 in any Steam library.")
     else:
         try:
-            with open(os.path.join(game.install_dir, "release_info.json")) as f:
+            with open(_release_info_path(game.install_dir), encoding="utf-8-sig") as f:
                 info = json.load(f)
             game.version_text = info.get("version", "?")
             game.version = parse_version(game.version_text)
         except (OSError, ValueError):
             game.problems.append("Could not read the game's release_info.json.")
 
-    for cand in USER_DATA_CANDIDATES:
-        p = os.path.expanduser(cand)
+    for p in osenv.game_user_data_candidates():
         if os.path.isdir(p):
             game.user_data = p
             break
@@ -132,28 +131,16 @@ def locate():
 
 
 def is_running():
-    """True if the game process exists (checked via /proc, never matches ourselves)."""
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
-            continue
-        try:
-            with open(f"/proc/{pid}/comm") as f:
-                if f.read().strip() == PROCESS_NAME:
-                    return True
-        except OSError:
-            continue
-    return False
+    """True if the game process exists (never matches this app)."""
+    return osenv.is_process_running(PROCESS_NAME)
 
 
 def launch():
-    subprocess.Popen(["xdg-open", f"steam://rungameid/{APP_ID}"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    osenv.open_target(f"steam://rungameid/{APP_ID}")
 
 
 def open_path(path):
-    subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+    osenv.open_target(path)
 
 
 def open_workshop_page(workshop_id):

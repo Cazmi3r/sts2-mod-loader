@@ -1,21 +1,41 @@
 # STS2 Mod Loader
 
-A desktop mod manager for **Slay the Spire 2** on Linux. It sits outside the game, so
-game updates can't break it, and it never patches or injects anything: it reads the
-game's own files and edits only the game's `settings.save`, the same file the in-game
-mod menu writes.
+A desktop mod manager for **Slay the Spire 2** on Linux, Windows and macOS. It sits
+outside the game, so game updates can't break it, and it never patches or injects
+anything: it reads the game's own files and edits only the game's `settings.save`, the
+same file the in-game mod menu writes.
 
-Pure Python 3 + GTK 3 (preinstalled on Linux Mint / Ubuntu / most GNOME and Cinnamon
-desktops). No other dependencies, no .NET.
+Pure Python 3 with Tk (Python's built-in window toolkit). One codebase for every OS, no
+.NET. [Pillow](https://pypi.org/project/pillow/) is optional: with it installed, Workshop
+previews that are JPEGs show up too.
+
+Dark theme by default. Set `STS2ML_THEME=light` for light, or `STS2ML_THEME=auto` to follow
+the desktop.
 
 ## Install
 
+**Linux**
+
 ```sh
-./install.sh            # adds "STS2 Mod Loader" to the applications menu
+sudo apt install python3-tk   # if it isn't there yet (Mint/Ubuntu/Debian)
+./install.sh                  # adds "STS2 Mod Loader" to the applications menu
 ./install.sh --uninstall
 ```
 
 Or run `./sts2-mod-loader` directly.
+
+**Windows**
+
+1. Install Python 3 from [python.org](https://www.python.org/downloads/) (keep "tcl/tk" ticked,
+   it is by default).
+2. Double-click `STS2 Mod Loader.pyw`.
+
+**macOS**
+
+1. Install Python 3 from [python.org](https://www.python.org/downloads/). Apple's built-in
+   Python has an outdated Tk that draws badly. With Homebrew, `brew install python-tk` works too.
+2. Double-click `STS2 Mod Loader.command`. The first time, macOS may ask you to allow it:
+   right-click it → Open.
 
 ## What it does
 
@@ -39,14 +59,22 @@ Or run `./sts2-mod-loader` directly.
   and every write makes a backup you can restore from the menu.
 - **Profiles.** Save and load named setups ("Solo", "Co-op with Sam"), including load
   order.
-- **Co-op compare.** *Export my mod list* produces a small JSON file. Your friend
-  opens it with *Compare with a friend's mod list* to see the branch/version
-  differences and the mods to subscribe to, enable or disable. *Match their setup*
-  stages the changes.
+- **Co-op compare.** *Copy my mod list code* puts one line of text on your clipboard
+  (`STS2:…`, about 100 characters for 8 mods, under 500 for 60). Paste it in Discord or wherever; your friend
+  opens *Compare with a friend's code* (it picks the code up from the clipboard) to see
+  the branch/version differences and the mods to subscribe to, enable or disable.
+  *Subscribe to all* gets the missing ones and *Match their setup* stages the rest.
 - **Get mods.** The *Get mods* tab browses and searches the Workshop (trending, most
-  subscribed, newest, recently updated, or paste an item link/ID). *Subscribe in Steam…*
-  opens the item in Steam; when Steam finishes the download the app notices, rescans and
-  health-checks the new mod. A missing dependency has a *Find on Workshop* button.
+  subscribed, newest, recently updated, or paste an item link/ID). **Subscribe** and
+  **Unsubscribe** work right in the app: they ask your running Steam client, through the
+  Steam library that ships with the game, exactly like the buttons on the Workshop page.
+  When Steam finishes the download the app notices, rescans and health-checks the new
+  mod. A missing dependency has a *Find on Workshop* button.
+- **Encrypted home folders (Linux).** Encrypted home folders (ecryptfs, an install option
+  on Mint/Ubuntu) only allow 143-character file names, so any mod that saves files with
+  longer names breaks. The app detects this and offers to move the game's data folder,
+  saves included, to `/srv/sts2-mod-loader/<you>/` on the normal disk, linked back so the
+  game finds it as before. It asks for your password once to create that folder.
 - **Workshop info.** Preview art, tags, subscriber counts and descriptions, plus a
   badge when Steam has a newer version queued.
 - **Play** launches the game through Steam (offering to apply pending changes first).
@@ -54,12 +82,13 @@ Or run `./sts2-mod-loader` directly.
 
 ## Where things live
 
-| What | Where |
-|---|---|
-| Settings backups (last 30) | `~/.local/share/sts2-mod-loader/backups/` |
-| Remembered log findings | `~/.local/share/sts2-mod-loader/history.json` |
-| Profiles | `~/.config/sts2-mod-loader/profiles/` |
-| Workshop info / code-check cache | `~/.cache/sts2-mod-loader/` |
+| What | Linux | Windows | macOS |
+|---|---|---|---|
+| Settings backups (last 30), remembered log findings | `~/.local/share/sts2-mod-loader/` | `%LOCALAPPDATA%\sts2-mod-loader\` | `~/Library/Application Support/sts2-mod-loader/` |
+| Profiles | `~/.config/sts2-mod-loader/profiles/` | `%APPDATA%\sts2-mod-loader\profiles\` | `~/Library/Application Support/sts2-mod-loader/profiles/` |
+| Workshop info / code-check cache | `~/.cache/sts2-mod-loader/` | `%LOCALAPPDATA%\sts2-mod-loader\cache\` | `~/Library/Caches/sts2-mod-loader/` |
+
+The game itself is found through Steam's library folders (Steam's registry entry on Windows).
 
 ## Network
 
@@ -86,8 +115,9 @@ real settings.
 ## Limits
 
 - Changes take effect the next time the game starts (that's how the game loads mods).
-- Subscribing and unsubscribing happen in Steam (Steam offers no way for other apps to
-  subscribe for you). The app opens the Workshop page and picks up the download itself.
+- Subscribing needs Steam running and signed in. While a request is sent (a second or
+  two), Steam shows you as playing Slay the Spire 2. If the game's Steam library can't be
+  found, Subscribe falls back to opening the Workshop page in Steam.
 - *Get mods* reads Steam's public browse page. If Steam redesigns that page, browsing may
   stop finding results until the app is updated; pasting an item link or ID still works.
 - Some mods ship several builds for different game versions and pick one at runtime.

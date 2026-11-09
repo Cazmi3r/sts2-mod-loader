@@ -14,7 +14,7 @@ def check():
     from . import apicheck
     api = apicheck.check_mods(mods, game)
     report = logscan.analyze(mods, game.logs_dir, live=game_mod.is_running(),
-                             api_results=api, game_version_text=game.version_text)
+                             api_results=api, game_version_text=game.version_text, game=game)
     print(f"Game {game.version_text} on branch '{game.branch}', {len(mods)} mods installed")
     for g in report.global_issues:
         print(f"  [{g.severity}] {g.title}")

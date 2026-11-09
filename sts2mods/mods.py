@@ -2,9 +2,10 @@
 
 import json
 import os
+import subprocess
 from dataclasses import dataclass, field
 
-from . import vdf
+from . import osenv, vdf
 from .game import format_version, parse_version
 
 WORKSHOP = "steam_workshop"
@@ -188,7 +189,7 @@ def _file_issue(mod, ext, label):
     if wrong_case:
         return Issue(ERROR, f"{label} file name has the wrong capitalization",
                      f"The game looks for '{mod.id}.{ext}' but the mod ships '{wrong_case[0]}'. "
-                     "This works on Windows (case-insensitive) but not on Linux. "
+                     "This works on Windows and macOS (they ignore capitalization) but not on Linux. "
                      "Fix creates a correctly named link to the existing file.",
                      fix=("symlink", wrong_case[0], expected), key=f"case-{ext}")
     return Issue(ERROR, f"{label} file is missing, so the mod won't load",
@@ -222,10 +223,6 @@ def static_checks(mod, mods, game):
                 parse_version(dep.version) < parse_version(min_v):
             issues.append(Issue(WARN, f"Requires {dep.name} {min_v}+, you have {dep.version}",
                                 key=f"dep-version-{dep_id}"))
-    if mod.id == RITSULIB_ID:
-        cache = ritsulib_cache_issue(game)
-        if cache:
-            issues.append(cache)
     for other in mod.shadowed:
         issues.append(Issue(INFO, f"Also installed from {other.source_label} (v{other.version or '?'})",
                             f"The game loads the higher version (v{mod.version or '?'} from "
@@ -233,37 +230,79 @@ def static_checks(mod, mods, game):
     return issues
 
 
-RITSULIB_ID = "STS2-RitsuLib"
-CACHE_TARGET = "/var/tmp/sts2-ritsulib"   # ext4, and visible inside Steam's game sandbox
+# Encrypted home folders (ecryptfs) cap file names at 143 characters. Mods that save files with
+# longer names into the game's data folder break, often without a clear error. The fix moves the
+# whole data folder (saves included) to /srv, which is on the normal unencrypted disk and visible
+# inside Steam's game runtime, and leaves a link in its place, so the game finds it as before.
+RELOCATE_BASE = "/srv/sts2-mod-loader"
 MIN_NAME_MAX = 200
 
 
 def _name_max(path):
+    if not hasattr(os, "statvfs"):      # Windows: NTFS allows 255 characters
+        return 255
     try:
-        return os.statvfs(path).f_namemax
+        return os.statvfs(path).f_namemax       # follows the link once the folder is moved
     except OSError:
         return 0
 
 
-def ritsulib_cache_issue(game):
-    """RitsuLib caches audio under user://ritsulib with ~170-character file names. Encrypted
-    home folders (ecryptfs) only allow 143, so every write fails. Fix: keep that folder on an
-    unencrypted file system via a symlink."""
-    if not game.user_data or _name_max(game.user_data) >= MIN_NAME_MAX:
+def short_name_limit(game):
+    """The file-name length limit of the game's data folder if it's too short for mods, else None."""
+    if not osenv.IS_LINUX or not game.user_data:
         return None
-    link = os.path.join(game.user_data, "ritsulib")
-    if os.path.islink(link):
-        target = os.path.realpath(link)
-        if os.path.isdir(target) and _name_max(target) >= MIN_NAME_MAX:
-            return None
-        why = "The folder it points to is gone (the system cleans /var/tmp after a while of no use)."
-    else:
-        why = "Its cache folder is inside your encrypted home folder."
-    return Issue(ERROR, "Can't save its audio cache, so modded sounds fail",
-                 f"Your home folder is encrypted (ecryptfs), which limits file names to "
-                 f"{_name_max(game.user_data)} characters. RitsuLib's audio cache uses longer names. {why} "
-                 f"Fix moves the cache to {CACHE_TARGET} (cache only, safe to lose) and links it back.",
-                 fix=("redirect-dir", link, CACHE_TARGET), key="ritsulib-cache")
+    n = _name_max(game.user_data)
+    return n if 0 < n < MIN_NAME_MAX else None
+
+
+def relocation_fix(game):
+    if not short_name_limit(game):
+        return None
+    import getpass
+    target = os.path.join(RELOCATE_BASE, getpass.getuser(), os.path.basename(game.user_data))
+    return ("relocate-user-data", game.user_data, target)
+
+
+def filesystem_issue(game):
+    """A global Issue (with a fix) when the game's data folder can't hold long file names."""
+    fix = relocation_fix(game)
+    if not fix:
+        return None
+    return Issue(ERROR, "Your home folder is encrypted, so mods that save long file names break",
+                 f"Encrypted home folders only allow file names up to {short_name_limit(game)} "
+                 "characters. Mods that cache or save files with longer names fail, sometimes "
+                 "silently (missing sounds, settings that don't stick, crashes). Fix moves the game's "
+                 f"data folder, saves included, to {fix[2]} on your normal disk and leaves a link "
+                 "in its place. You'll be asked for your password once to create that folder. "
+                 "Files there aren't encrypted.",
+                 fix=fix, key="short-file-names")
+
+
+def _relocate_user_data(source, target):
+    import shutil
+    if os.path.islink(source):
+        raise OSError(f"{source} is already a link")
+    parent = os.path.dirname(target)
+    if not os.path.isdir(parent):
+        # /srv belongs to root: create our folder there once, owned by this user.
+        subprocess.run(["pkexec", "install", "-d", "-m", "700", "-o", str(os.getuid()),
+                        "-g", str(os.getgid()), parent], check=False)
+        if not os.path.isdir(parent):
+            raise OSError(f"Couldn't create {parent} (password prompt cancelled or failed).")
+    if os.path.exists(target):
+        raise OSError(f"{target} already exists. Move or delete it first.")
+    tmp = target + ".partial"
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(source, tmp, symlinks=False, ignore_dangling_symlinks=True)
+    os.rename(tmp, target)
+    old = source + ".moving"
+    os.rename(source, old)
+    try:
+        os.symlink(target, source)
+    except OSError:
+        os.rename(old, source)        # put everything back as it was
+        raise
+    shutil.rmtree(old, ignore_errors=True)
 
 
 def apply_fix(fix):
@@ -273,15 +312,8 @@ def apply_fix(fix):
         _, target, link = fix
         if not os.path.lexists(link):
             os.symlink(target, link)
-    elif kind == "redirect-dir":
-        import shutil
-        _, link, target = fix
-        os.makedirs(target, exist_ok=True)
-        if os.path.islink(link):
-            os.remove(link)
-        elif os.path.isdir(link):
-            shutil.rmtree(link)          # a cache folder: contents are regenerated
-        os.symlink(target, link)
+    elif kind == "relocate-user-data":
+        _relocate_user_data(fix[1], fix[2])
     else:
         raise OSError(f"unknown fix {kind}")
 

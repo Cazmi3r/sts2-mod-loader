@@ -123,27 +123,30 @@ class TestScan(Sandbox):
         self.assertEqual(mods_mod.dependent_closure(mods, "Lib"), {"Mid", "Top"})
 
 
-class TestRitsuLibCache(Sandbox):
-    def test_detect_and_fix(self):
-        target = os.path.join(self.tmp, "unencrypted", "ritsulib")
-        link = os.path.join(self.user, "ritsulib")
-        os.makedirs(os.path.join(link, "fmod-cache"))
+class TestShortFileNames(Sandbox):
+    """Encrypted home folders cap file names at 143 characters. The fix moves the game's whole
+    data folder to an unencrypted disk and links it back."""
+
+    def test_relocate_user_data(self):
+        base = os.path.join(self.tmp, "unencrypted")
+        os.makedirs(base)
         small = lambda p: 255 if "unencrypted" in os.path.realpath(p) else 143  # noqa: E731
         with mock.patch.object(mods_mod, "_name_max", side_effect=small), \
-                mock.patch.object(mods_mod, "CACHE_TARGET", target):
-            iss = mods_mod.ritsulib_cache_issue(self.game)
-            self.assertIsNotNone(iss)
+                mock.patch.object(mods_mod, "RELOCATE_BASE", base), \
+                mock.patch.object(mods_mod.osenv, "IS_LINUX", True):
+            iss = mods_mod.filesystem_issue(self.game)
+            self.assertEqual(iss.fix[0], "relocate-user-data")
+            os.makedirs(os.path.dirname(iss.fix[2]))
             mods_mod.apply_fix(iss.fix)
-            self.assertTrue(os.path.islink(link))
-            self.assertIsNone(mods_mod.ritsulib_cache_issue(self.game))
-            shutil.rmtree(target)                       # /var/tmp got cleaned
-            self.assertIsNotNone(mods_mod.ritsulib_cache_issue(self.game))
-            mods_mod.apply_fix(mods_mod.ritsulib_cache_issue(self.game).fix)
-            self.assertIsNone(mods_mod.ritsulib_cache_issue(self.game))
+            self.assertTrue(os.path.islink(self.user))
+            self.assertEqual(json.loads(read(self.settings_path))["volume_master"], 0.5)  # saves kept
+            self.assertIsNone(mods_mod.filesystem_issue(self.game))
+            report = logscan.analyze({}, self.game.logs_dir, use_history=False, game=self.game)
+            self.assertFalse(any(i.key == "short-file-names" for i in report.global_issues))
 
     def test_not_needed_on_normal_filesystem(self):
         with mock.patch.object(mods_mod, "_name_max", return_value=255):
-            self.assertIsNone(mods_mod.ritsulib_cache_issue(self.game))
+            self.assertIsNone(mods_mod.filesystem_issue(self.game))
 
 
 class TestSettings(Sandbox):
@@ -260,10 +263,43 @@ class TestProfiles(Sandbox):
         self.assertEqual(len(diff["optional_only"]), 1)
         self.assertFalse(profiles.diff_is_clean(diff))
 
-        path = os.path.join(self.tmp, "export.json")
-        profiles.export_modlist(path, {"Lib": True, "Char": False, "Mine": True}, mods, self.game)
-        exported = profiles.import_modlist(path)
-        self.assertEqual({m["id"] for m in exported["mods"]}, {"Lib", "Mine"})
+        code = profiles.share_code({"Lib": True, "Char": False, "Mine": True}, mods, self.game)
+        self.assertEqual({m["workshop_id"] for m in profiles.parse_share_code(code)["mods"]}, {"1", "3"})
+
+
+class TestShareCode(Sandbox):
+    def test_roundtrip_inside_chat_message(self):
+        self.add_workshop_mod("1", "Lib")
+        write(os.path.join(self.local, "Mine", "Mine.json"), manifest("Mine", name="My Local Mod"))
+        write(os.path.join(self.local, "Mine", "Mine.dll"), "x")
+        mods = mods_mod.scan(self.game)
+        code = profiles.share_code({"Lib": True, "Mine": True}, mods, self.game)
+        self.assertTrue(code.startswith(profiles.SHARE_PREFIX))
+        theirs = profiles.parse_share_code(f"yo use this:\n{code}\nthanks")
+        self.assertEqual(theirs["branch"], "public-beta")
+        self.assertEqual([m["workshop_id"] for m in theirs["mods"] if m["workshop_id"]], ["1"])
+        self.assertEqual([m["id"] for m in theirs["mods"] if not m["workshop_id"]], ["Mine"])
+        self.assertTrue(profiles.diff_is_clean(profiles.compare(theirs, {"Lib": True, "Mine": True},
+                                                                mods, self.game)))
+
+    def test_compare_by_workshop_id(self):
+        self.add_workshop_mod("3747500076", "Lib")
+        self.add_workshop_mod("3747501308", "Char", version="2.0.0")
+        mods = mods_mod.scan(self.game)
+        code = profiles.share_code({"Lib": True, "Char": True}, mods, self.game)
+        mods["Char"].version = "2.0.1"                      # I have a newer copy
+        diff = profiles.compare(profiles.parse_share_code(code), {"Lib": False, "Char": True}, mods, self.game)
+        self.assertEqual([t["id"] for t in diff["disabled"]], ["Lib"])     # resolved from Workshop ID
+        self.assertEqual([p[0].id for p in diff["version"]], ["Char"])
+        theirs = profiles.parse_share_code(code)
+        diff = profiles.compare(theirs, {}, {}, self.game)
+        self.assertEqual(sorted(t["workshop_id"] for t in diff["missing"]), ["3747500076", "3747501308"])
+
+    def test_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            profiles.parse_share_code("hello")
+        with self.assertRaises(ValueError):
+            profiles.parse_share_code(profiles.SHARE_PREFIX + "abc")
 
 
 class TestWorkshopBrowse(unittest.TestCase):
@@ -286,8 +322,13 @@ class TestWorkshopBrowse(unittest.TestCase):
         self.assertEqual(workshop.english_ratio({"title": "Better Map", "description": "[b]Shows more[/b]"}), 1.0)
         self.assertEqual(workshop.english_ratio({"title": "更好的地图", "description": "显示更多"}), 0.0)
         self.assertEqual(workshop.english_ratio({}), 1.0)
-        mixed = workshop.english_ratio({"title": "BetterMap 更好的地图模组", "description": ""})
-        self.assertGreater(mixed, workshop.MIN_ENGLISH)
+        # Bilingual titles are shown even though most of their letters are Chinese.
+        self.assertTrue(workshop.looks_english({"title": "BetterMap 更好的地图模组", "description": ""}))
+        self.assertTrue(workshop.looks_english({"title": "ARAM: Mayhem / 海克斯大乱斗", "description": "全中文介绍"}))
+        # Chinese listings with only filler English stay hidden.
+        self.assertFalse(workshop.looks_english({"title": "【CN】角色禁用 Mod Beta v1.2", "description": "显示更多"}))
+        self.assertFalse(workshop.looks_english({"title": "更好的地图", "description": "显示更多"}))
+        self.assertTrue(workshop.looks_english({"title": "更好的地图", "description": "Shows more of the map"}))
 
     def test_browse_offline(self):
         with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
