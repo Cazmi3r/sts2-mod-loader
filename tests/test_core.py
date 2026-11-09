@@ -263,10 +263,8 @@ class TestProfiles(Sandbox):
         self.assertEqual(len(diff["optional_only"]), 1)
         self.assertFalse(profiles.diff_is_clean(diff))
 
-        path = os.path.join(self.tmp, "export.json")
-        profiles.export_modlist(path, {"Lib": True, "Char": False, "Mine": True}, mods, self.game)
-        exported = profiles.import_modlist(path)
-        self.assertEqual({m["id"] for m in exported["mods"]}, {"Lib", "Mine"})
+        code = profiles.share_code({"Lib": True, "Char": False, "Mine": True}, mods, self.game)
+        self.assertEqual({m["workshop_id"] for m in profiles.parse_share_code(code)["mods"]}, {"1", "3"})
 
 
 class TestShareCode(Sandbox):
@@ -279,11 +277,23 @@ class TestShareCode(Sandbox):
         self.assertTrue(code.startswith(profiles.SHARE_PREFIX))
         theirs = profiles.parse_share_code(f"yo use this:\n{code}\nthanks")
         self.assertEqual(theirs["branch"], "public-beta")
-        by_id = {m["id"]: m for m in theirs["mods"]}
-        self.assertEqual(by_id["Lib"]["workshop_id"], "1")
-        self.assertEqual(by_id["Mine"]["name"], "My Local Mod")     # local mods keep their name
+        self.assertEqual([m["workshop_id"] for m in theirs["mods"] if m["workshop_id"]], ["1"])
+        self.assertEqual([m["id"] for m in theirs["mods"] if not m["workshop_id"]], ["Mine"])
         self.assertTrue(profiles.diff_is_clean(profiles.compare(theirs, {"Lib": True, "Mine": True},
                                                                 mods, self.game)))
+
+    def test_compare_by_workshop_id(self):
+        self.add_workshop_mod("3747500076", "Lib")
+        self.add_workshop_mod("3747501308", "Char", version="2.0.0")
+        mods = mods_mod.scan(self.game)
+        code = profiles.share_code({"Lib": True, "Char": True}, mods, self.game)
+        mods["Char"].version = "2.0.1"                      # I have a newer copy
+        diff = profiles.compare(profiles.parse_share_code(code), {"Lib": False, "Char": True}, mods, self.game)
+        self.assertEqual([t["id"] for t in diff["disabled"]], ["Lib"])     # resolved from Workshop ID
+        self.assertEqual([p[0].id for p in diff["version"]], ["Char"])
+        theirs = profiles.parse_share_code(code)
+        diff = profiles.compare(theirs, {}, {}, self.game)
+        self.assertEqual(sorted(t["workshop_id"] for t in diff["missing"]), ["3747500076", "3747501308"])
 
     def test_rejects_garbage(self):
         with self.assertRaises(ValueError):
@@ -312,8 +322,13 @@ class TestWorkshopBrowse(unittest.TestCase):
         self.assertEqual(workshop.english_ratio({"title": "Better Map", "description": "[b]Shows more[/b]"}), 1.0)
         self.assertEqual(workshop.english_ratio({"title": "更好的地图", "description": "显示更多"}), 0.0)
         self.assertEqual(workshop.english_ratio({}), 1.0)
-        mixed = workshop.english_ratio({"title": "BetterMap 更好的地图模组", "description": ""})
-        self.assertGreater(mixed, workshop.MIN_ENGLISH)
+        # Bilingual titles are shown even though most of their letters are Chinese.
+        self.assertTrue(workshop.looks_english({"title": "BetterMap 更好的地图模组", "description": ""}))
+        self.assertTrue(workshop.looks_english({"title": "ARAM: Mayhem / 海克斯大乱斗", "description": "全中文介绍"}))
+        # Chinese listings with only filler English stay hidden.
+        self.assertFalse(workshop.looks_english({"title": "【CN】角色禁用 Mod Beta v1.2", "description": "显示更多"}))
+        self.assertFalse(workshop.looks_english({"title": "更好的地图", "description": "显示更多"}))
+        self.assertTrue(workshop.looks_english({"title": "更好的地图", "description": "Shows more of the map"}))
 
     def test_browse_offline(self):
         with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):

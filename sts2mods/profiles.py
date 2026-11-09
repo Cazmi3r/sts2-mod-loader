@@ -7,10 +7,9 @@ import re
 import time
 import zlib
 
-from . import __version__, osenv
+from . import osenv
 
 PROFILE_DIR = os.path.join(osenv.config_dir(), "profiles")
-EXPORT_FORMAT = "sts2-mod-loader/modlist-1"
 
 
 def _safe(name):
@@ -62,53 +61,83 @@ def delete_profile(name):
         pass
 
 
-def modlist_data(states, mods, game):
-    """The enabled mods plus game version/branch: what a friend needs to compare setups."""
-    return {
-        "format": EXPORT_FORMAT,
-        "tool": f"sts2-mod-loader {__version__}",
-        "exported": time.strftime("%Y-%m-%d %H:%M"),
-        "game_version": game.version_text,
-        "branch": game.branch,
-        "mods": [{"id": m.id, "name": m.name, "version": m.version, "workshop_id": m.workshop_id,
-                  "affects_gameplay": m.affects_gameplay}
-                 for m in sorted(mods.values(), key=lambda m: m.name.lower())
-                 if states.get(m.id, True)],
-    }
+# ---- share codes: the mod list as one short line of text to paste in a chat ----------------
+#
+# Packed bytes in URL-safe base64, after the "STS2:" prefix:
+#   format (1 byte), game version, branch            strings are a length then UTF-8
+#   number of Workshop mods, then for each (sorted by Workshop ID):
+#     ID difference from the previous one * 2 + gameplay flag   (varint)
+#     version fingerprint (2 bytes: CRC-32 of the version text, low 16 bits)
+#   number of local mods, then for each: id, version, gameplay flag
+# Workshop mods carry no id or name: the receiver matches the Workshop ID against its own mods
+# and looks up titles on the Workshop. That keeps a mod to about 6 bytes (8 characters).
+
+SHARE_PREFIX = "STS2:"
+SHARE_FORMAT = 1
+RE_SHARE = re.compile(re.escape(SHARE_PREFIX) + r"([A-Za-z0-9_-]{4,})")
 
 
-def export_modlist(path, states, mods, game):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(modlist_data(states, mods, game), f, indent=2, ensure_ascii=False)
+def version_fingerprint(version):
+    return zlib.crc32((version or "").strip().encode("utf-8")) & 0xFFFF
 
 
-def import_modlist(path):
-    with open(path, encoding="utf-8-sig") as f:
-        data = json.load(f)
-    if not isinstance(data, dict) or not isinstance(data.get("mods"), list):
-        raise ValueError("This file isn't a mod list exported by STS2 Mod Loader.")
-    return data
+def _varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
 
 
-# ---- share codes: the same mod list as one line of text to paste in a chat ------------------
+def _string(text):
+    raw = (text or "").encode("utf-8")
+    return _varint(len(raw)) + raw
 
-SHARE_PREFIX = "STS2MODS1:"
-RE_SHARE = re.compile(re.escape(SHARE_PREFIX) + r"([A-Za-z0-9_-]+)")
+
+class _Reader:
+    def __init__(self, data):
+        self.data, self.pos = data, 0
+
+    def byte(self):
+        self.pos += 1
+        return self.data[self.pos - 1]
+
+    def varint(self):
+        n = shift = 0
+        while True:
+            b = self.byte()
+            n |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80:
+                return n
+
+    def string(self):
+        n = self.varint()
+        self.pos += n
+        if self.pos > len(self.data):
+            raise IndexError("truncated")
+        return self.data[self.pos - n:self.pos].decode("utf-8")
 
 
 def share_code(states, mods, game):
-    """A compact, paste-able code for the enabled mods. Workshop mods are sent without their
-    names (the receiver looks those up on the Workshop), which keeps the code short."""
-    data = modlist_data(states, mods, game)
-    rows = []
-    for m in data["mods"]:
-        row = [m["id"], m["version"] or "", m["workshop_id"] or "", 1 if m["affects_gameplay"] else 0]
-        if not m["workshop_id"] and m["name"] != m["id"]:
-            row.append(m["name"])
-        rows.append(row)
-    compact = {"g": data["game_version"], "b": data["branch"], "m": rows}
-    raw = json.dumps(compact, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return SHARE_PREFIX + base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip("=")
+    enabled = [m for m in mods.values() if states.get(m.id, True)]
+    workshop = sorted((m for m in enabled if m.workshop_id and m.workshop_id.isdigit()),
+                      key=lambda m: int(m.workshop_id))
+    local = [m for m in enabled if m not in workshop]
+    out = bytearray([SHARE_FORMAT]) + _string(game.version_text) + _string(game.branch)
+    out += _varint(len(workshop))
+    prev = 0
+    for m in workshop:
+        wid = int(m.workshop_id)
+        out += _varint((wid - prev) * 2 + int(m.affects_gameplay))
+        out += version_fingerprint(m.version).to_bytes(2, "big")
+        prev = wid
+    out += _varint(len(local))
+    for m in local:
+        out += _string(m.id) + _string(m.version) + bytes([int(m.affects_gameplay)])
+    return SHARE_PREFIX + base64.urlsafe_b64encode(bytes(out)).decode().rstrip("=")
 
 
 def find_share_code(text):
@@ -117,30 +146,50 @@ def find_share_code(text):
 
 
 def parse_share_code(text):
-    """Accepts a code, or any text containing one (e.g. a pasted chat message). Returns the same
-    structure as import_modlist. Raises ValueError for anything else."""
-    m = RE_SHARE.search(text or "")
-    if not m:
+    """Accepts a code, or any text containing one (e.g. a pasted chat message). Returns
+    {"game_version", "branch", "mods": [...]}; Workshop entries have "id": None and a
+    "version_fingerprint" instead of a version. Raises ValueError."""
+    code = find_share_code(text)
+    if not code:
         raise ValueError("That doesn't contain a mod list code. Codes start with " + SHARE_PREFIX)
-    body = m.group(1)
+    body = code[len(SHARE_PREFIX):]
     try:
-        raw = zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-        compact = json.loads(raw.decode("utf-8"))
-        mods = []
-        for row in compact["m"]:
-            mod_id, version, wid, gameplay = row[:4]
-            mods.append({"id": mod_id, "name": row[4] if len(row) > 4 else mod_id, "version": version,
-                         "workshop_id": wid or None, "affects_gameplay": bool(gameplay)})
-    except (ValueError, KeyError, TypeError, IndexError, zlib.error) as e:
+        r = _Reader(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if r.byte() != SHARE_FORMAT:
+            raise ValueError("This code was made by a newer version of STS2 Mod Loader. Update to read it.")
+        data = {"game_version": r.string(), "branch": r.string(), "mods": []}
+        wid = 0
+        for _ in range(r.varint()):
+            n = r.varint()
+            wid += n >> 1
+            fp = int.from_bytes(bytes([r.byte(), r.byte()]), "big")
+            data["mods"].append({"id": None, "workshop_id": str(wid), "name": f"Workshop item {wid}",
+                                 "version_fingerprint": fp, "affects_gameplay": bool(n & 1)})
+        for _ in range(r.varint()):
+            mod_id, version = r.string(), r.string()
+            data["mods"].append({"id": mod_id, "name": mod_id, "version": version, "workshop_id": None,
+                                 "affects_gameplay": bool(r.byte())})
+    except ValueError as e:
+        if "newer version" in str(e):
+            raise
         raise ValueError("That mod list code is damaged or incomplete. Ask for it again and copy "
                          "the whole line.") from e
-    return {"format": EXPORT_FORMAT, "game_version": compact.get("g"), "branch": compact.get("b"),
-            "mods": mods}
+    except (IndexError, UnicodeDecodeError) as e:
+        raise ValueError("That mod list code is damaged or incomplete. Ask for it again and copy "
+                         "the whole line.") from e
+    return data
 
 
 def compare(theirs, states, mods, game):
     """Differences that matter for joining each other's co-op games."""
-    their_mods = {m["id"]: m for m in theirs["mods"] if isinstance(m, dict) and m.get("id")}
+    by_wid = {m.workshop_id: mid for mid, m in mods.items() if m.workshop_id}
+    their_mods = {}
+    for t in theirs["mods"]:
+        if not isinstance(t, dict):
+            continue
+        # Share codes identify Workshop mods by Workshop ID only; match them to installed mods.
+        mid = t.get("id") or by_wid.get(t.get("workshop_id")) or f"workshop:{t.get('workshop_id')}"
+        their_mods[mid] = dict(t, id=mid) if mid in mods else t
     mine = {mid: m for mid, m in mods.items() if states.get(mid, True)}
     diff = {"branch": None, "game_version": None, "missing": [], "disabled": [], "extra": [],
             "version": [], "optional_only": []}
@@ -154,6 +203,9 @@ def compare(theirs, states, mods, game):
             (diff["missing"] if gameplay else diff["optional_only"]).append(t)
         elif mid not in mine:
             (diff["disabled"] if gameplay else diff["optional_only"]).append(t)
+        elif "version_fingerprint" in t:
+            if version_fingerprint(mods[mid].version) != t["version_fingerprint"]:
+                diff["version"].append((mods[mid], t))
         elif t.get("version") and mods[mid].version != t["version"]:
             diff["version"].append((mods[mid], t))
     for mid, m in mine.items():

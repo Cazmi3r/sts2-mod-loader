@@ -60,7 +60,7 @@ Or run `./sts2-mod-loader` directly.
 - **Profiles.** Save and load named setups ("Solo", "Co-op with Sam"), including load
   order.
 - **Co-op compare.** *Copy my mod list code* puts one line of text on your clipboard
-  (`STS2MODS1:…`, a few hundred characters). Paste it in Discord or wherever; your friend
+  (`STS2:…`, about 100 characters for 8 mods, under 500 for 60). Paste it in Discord or wherever; your friend
   opens *Compare with a friend's code* (it picks the code up from the clipboard) to see
   the branch/version differences and the mods to subscribe to, enable or disable.
   *Subscribe to all* gets the missing ones and *Match their setup* stages the rest.

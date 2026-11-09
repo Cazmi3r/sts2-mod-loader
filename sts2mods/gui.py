@@ -439,7 +439,7 @@ class BrowsePage(tk.Frame):
             info = workshop.fetch_details(ids)
             ids = [w for w in ids if info.get(w, {}).get("app_id") in (None, "", game_mod.APP_ID)]
             shown = ids if workshop.query_item_id(query) else \
-                [w for w in ids if w not in info or workshop.english_ratio(info[w]) >= workshop.MIN_ENGLISH]
+                [w for w in ids if w not in info or workshop.looks_english(info[w])]
             return shown, bool(ids), total, info
 
         def done(result):
@@ -1645,7 +1645,7 @@ class Window:
             self.state.workshop.update(info or {})
             for m in theirs["mods"]:
                 title = (self.state.workshop.get(m.get("workshop_id") or "") or {}).get("title")
-                if m["name"] == m["id"] and title:
+                if title:
                     m["name"] = title
             self.show_comparison(theirs)
         self.toast("Comparing…")
@@ -1682,9 +1682,10 @@ class Window:
         def missing_row(t):
             row = tk.Frame(dt.d, bg=C["surface"])
             row.pack(fill="x", pady=2)
-            tk.Label(row, text=f"{t.get('name', t['id'])}", bg=C["surface"]).pack(side="left")
-            tk.Label(row, text=f"v{clean_version(t.get('version'))}", fg=C["dim"], bg=C["surface"]) \
-                .pack(side="left", padx=(6, 0))
+            tk.Label(row, text=t.get("name") or t.get("id"), bg=C["surface"]).pack(side="left")
+            if t.get("version"):
+                tk.Label(row, text=f"v{clean_version(t['version'])}", fg=C["dim"], bg=C["surface"]) \
+                    .pack(side="left", padx=(6, 0))
             if t.get("workshop_id"):
                 Pill(row, "Subscribe", lambda: self.subscribe([t["workshop_id"]], {t["workshop_id"]: t.get("name")}),
                      pady=3, padx=10).pack(side="right")
@@ -1696,11 +1697,12 @@ class Window:
             Pill(b, f"Subscribe to all {len(missing_ids)}", lambda: self.subscribe(missing_ids, names),
                  "primary", pady=4).pack(side="left")
         section("They have it enabled, you have it disabled", diff["disabled"],
-                lambda t: dt.text(t.get("name", t["id"])))
+                lambda t: dt.text(t.get("name") or t.get("id")))
         section("You have enabled, they don't", diff["extra"], lambda m: dt.text(m.name))
         section("Different versions (one of you needs the Workshop update)", diff["version"],
-                lambda pair: dt.text(f"{pair[0].name}: you v{clean_version(pair[0].version)}, they "
-                                     f"v{clean_version(pair[1].get('version'))}"))
+                lambda pair: dt.text(f"{pair[0].name}: you have v{clean_version(pair[0].version)}, theirs is "
+                                     + (f"v{clean_version(pair[1]['version'])}" if pair[1].get("version")
+                                        else "a different version")))
         if diff["optional_only"]:
             dt.text(f"{plural(len(diff['optional_only']), 'client-side mod')} differ too, which doesn't "
                     "matter for co-op.", dim=True, pady=(14, 0))
