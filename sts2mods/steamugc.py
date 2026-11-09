@@ -5,7 +5,8 @@ of Steam's API library that ships with Slay the Spire 2 and talks to the running
 as the game (app id 2868840). Steam downloads the item exactly as if you had clicked Subscribe
 on the Workshop page.
 
-Each request runs in a short-lived child process (`python -m sts2mods.steamugc ...`): a crash in
+Each request runs in a short-lived child process (this app started again with --steam-helper,
+which also works from the packaged Windows .exe): a crash in
 native code can't take the window down, and Steam only sees "playing Slay the Spire 2" for the
 second or two the request takes.
 """
@@ -15,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import APP_ID, osenv
@@ -163,25 +165,36 @@ def _request(action, game, ids, timeout=60):
     lib = find_library(game.install_dir)
     if not lib:
         raise SteamError("Steam's library wasn't found in the game folder")
-    pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = dict(os.environ, PYTHONPATH=pkg_parent + os.pathsep + os.environ.get("PYTHONPATH", ""))
-    exe = sys.executable
-    if osenv.IS_WINDOWS and exe.lower().endswith("pythonw.exe"):
-        console = exe[:-len("pythonw.exe")] + "python.exe"   # pythonw has no stdout to read
-        exe = console if os.path.exists(console) else exe
+    if getattr(sys, "frozen", False):            # packaged app: the executable is the app itself
+        cmd, env, cwd = [sys.executable], None, None
+    else:
+        pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cmd = [sys.executable, "-m", "sts2mods"]
+        env = dict(os.environ, PYTHONPATH=pkg_parent + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        cwd = pkg_parent
+    # The answer comes back in a file: windowed apps (pythonw, the .exe) have no usable stdout.
+    fd, out = tempfile.mkstemp(prefix="sts2ml-steam-", suffix=".json")
+    os.close(fd)
     try:
-        proc = subprocess.run([exe, "-m", "sts2mods.steamugc", action, lib, *map(str, ids)],
-                              capture_output=True, text=True, timeout=timeout, env=env,
-                              cwd=pkg_parent, creationflags=0x08000000 if osenv.IS_WINDOWS else 0)
-    except subprocess.TimeoutExpired as e:
-        raise SteamError("Steam didn't answer in time") from e
-    except OSError as e:
-        raise SteamError(str(e)) from e
-    lines = [line for line in proc.stdout.splitlines() if line.startswith("{")]
-    if not lines:
-        raise SteamError("the Steam helper stopped unexpectedly" +
-                         (f": {proc.stderr.strip().splitlines()[-1]}" if proc.stderr.strip() else ""))
-    res = json.loads(lines[-1])
+        try:
+            proc = subprocess.run(cmd + ["--steam-helper", out, action, lib, *map(str, ids)],
+                                  capture_output=True, text=True, timeout=timeout, env=env, cwd=cwd,
+                                  creationflags=0x08000000 if osenv.IS_WINDOWS else 0)
+        except subprocess.TimeoutExpired as e:
+            raise SteamError("Steam didn't answer in time") from e
+        except OSError as e:
+            raise SteamError(str(e)) from e
+        try:
+            with open(out, encoding="utf-8") as f:
+                res = json.load(f)
+        except (OSError, ValueError):
+            err = (proc.stderr or "").strip().splitlines()
+            raise SteamError("the Steam helper stopped unexpectedly" + (f": {err[-1]}" if err else ""))
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
     if not res.get("ok"):
         raise SteamError(res.get("error") or "unknown error")
     return res["results"]
@@ -205,7 +218,10 @@ def item_states(game, ids):
     return {w: r.get("state", 0) for w, r in _request("state", game, ids).items()}
 
 
-if __name__ == "__main__":
-    print(json.dumps(_child(sys.argv[1:])))
-    sys.stdout.flush()
+def helper_main(argv):
+    """Entry point of the child process: --steam-helper <result file> <action> <lib> <ids...>."""
+    out, args = argv[0], argv[1:]
+    result = _child(args)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(result, f)
     os._exit(0)     # skip interpreter teardown around the native library

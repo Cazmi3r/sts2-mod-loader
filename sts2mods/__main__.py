@@ -35,6 +35,10 @@ def check():
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--steam-helper"]:          # internal: one Steam request (see steamugc.py)
+        from .steamugc import helper_main
+        return helper_main(argv[1:])
     ap = argparse.ArgumentParser(prog="sts2-mod-loader")
     ap.add_argument("--check", action="store_true", help="print a health report and exit")
     ap.add_argument("--version", action="version", version=__version__)
