@@ -106,6 +106,19 @@ class Worker:
             root.after(40, cls.pump, root)
 
 
+class WorkerPool:
+    """Several Workers sharing jobs round-robin, so independent downloads (Workshop
+    pictures) run side by side instead of one after another."""
+
+    def __init__(self, name, size):
+        self.workers = [Worker(f"{name}-{i}") for i in range(size)]
+        self.next = 0
+
+    def submit(self, fn, callback):
+        self.workers[self.next].submit(fn, callback)
+        self.next = (self.next + 1) % len(self.workers)
+
+
 # ------------------------------------------------------------------------------------------
 # State (no widgets)
 # ------------------------------------------------------------------------------------------
@@ -365,7 +378,6 @@ class BrowsePage(tk.Frame):
         self.gen = 0
         self.started = False
         self.selected = None
-        self.thumbs = Worker("thumbnails")
 
         bar = tk.Frame(self, bg=C["surface"], padx=14, pady=10)
         bar.pack(fill="x")
@@ -491,7 +503,7 @@ class BrowsePage(tk.Frame):
                 img = load_image(path, 52, 52)
                 if img:
                     row.set_thumb(img)
-        self.thumbs.submit(lambda: workshop.preview_path(row.wid, url, thumb=True), done)
+        self.win.pictures.submit(lambda: workshop.preview_path(row.wid, url, thumb=True), done)
 
     def refresh_installed(self):
         for row in self.rows.values():
@@ -590,14 +602,7 @@ class BrowsePage(tk.Frame):
         self.details.to_top()
 
     def _load_preview(self, wid, url, target, head):
-        def done(path):
-            if path and target.winfo_exists():
-                img = load_image(path, 168, 168)
-                if img:
-                    target.image = img
-                    target.configure(image=img)
-                    target.pack(side="left", padx=(0, 20), before=head.winfo_children()[1])
-        self.win.net.submit(lambda: workshop.preview_path(wid, url), done)
+        self.win.show_preview(wid, url, target, head)
 
 
 # ------------------------------------------------------------------------------------------
@@ -667,6 +672,7 @@ class Window:
         self._toast_job = None
         self.cpu = Worker("health-check")
         self.net = Worker("workshop")
+        self.pictures = WorkerPool("pictures", 6)   # Workshop previews, several at a time
         self.steam = Worker("steam")
         self.workshop_sig = self._workshop_signature()
 
@@ -677,6 +683,8 @@ class Window:
         self.start_health_check()
         self.start_workshop_fetch()
         root.after(2000, self._poll)
+        # tidy the picture cache once things have settled (background thread)
+        root.after(5000, lambda: self.cpu.submit(workshop.prune_previews, lambda _r: None))
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         Worker.pump(root)
 
@@ -1365,14 +1373,34 @@ class Window:
                 .pack(side="left", padx=(10, 0))
 
     def _load_preview(self, wid, url, target, head):
-        def done(path):
-            if path and target.winfo_exists():
-                img = load_image(path, 168, 168)
-                if img:
-                    target.image = img
-                    target.configure(image=img)
-                    target.pack(side="left", padx=(0, 20), anchor="n", before=head.winfo_children()[1])
-        self.net.submit(lambda: workshop.preview_path(wid, url), done)
+        self.show_preview(wid, url, target, head, anchor="n")
+
+    PREVIEW_PX = 168
+
+    def show_preview(self, wid, url, target, head, **pack):
+        """Put a Workshop item's preview in a details pane: the small list thumbnail at once
+        (scaled up, so a little soft) if it's cached, then the sharp version when it's ready."""
+        state = {"sharp": False}
+
+        def put(img, sharp):
+            if not img or not target.winfo_exists() or state["sharp"]:
+                return
+            state["sharp"] = sharp
+            target.image = img
+            target.configure(image=img)
+            if not target.winfo_manager():
+                target.pack(side="left", padx=(0, 20), before=head.winfo_children()[1], **pack)
+
+        thumb = workshop.thumb_cache_path(wid)
+        if os.path.exists(thumb):
+            small = load_image(thumb, 96, 96)
+            if small and small.width():
+                # integer zoom/subsample: about 1.75x, up to PREVIEW_PX
+                z = max(1, round(self.PREVIEW_PX / small.width() * 4))
+                put(small.zoom(z).subsample(4) if z > 4 else small, False)
+        self.pictures.submit(lambda: workshop.preview_path(wid, url),
+                             lambda path: put(load_image(path, self.PREVIEW_PX, self.PREVIEW_PX), True)
+                             if path else None)
 
     # ---- actions -------------------------------------------------------------------------
 

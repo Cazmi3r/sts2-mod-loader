@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -374,6 +375,107 @@ class TestSslContext(unittest.TestCase):
         ctx = self.osenv.ssl_context()
         self.assertIs(ctx, self.osenv.ssl_context())
         self.assertEqual(ctx.verify_mode, __import__("ssl").CERT_REQUIRED)
+
+
+class TestPreviewConversion(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS only (sips)")
+    def test_jpeg_becomes_png_with_sips(self):
+        import subprocess
+        d = tempfile.mkdtemp()
+        png = os.path.join(d, "src.png")
+        # build a valid 40x30 RGB PNG, turn it into a JPEG with sips, then back with the helper
+        import struct, zlib
+        w, h = 40, 30
+        raw = b"".join(b"\x00" + b"".join(bytes((x * 6, y * 8, 120)) for x in range(w)) for y in range(h))
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        with open(png, "wb") as f:
+            f.write(workshop.PNG_MAGIC + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+                    chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        jpg = os.path.join(d, "src.jpg")
+        subprocess.run(["sips", "-s", "format", "jpeg", png, "--out", jpg], capture_output=True, check=True)
+        with open(jpg, "rb") as f:
+            jpeg = f.read()
+        self.assertEqual(jpeg[:3], b"\xff\xd8\xff")
+        out = os.path.join(d, "out.thumb")
+        self.assertTrue(workshop._convert_with_os(jpeg, out, 96))
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(8), workshop.PNG_MAGIC)
+        self.assertFalse(os.path.exists(out + ".src.jpg"))
+
+    def test_no_converter_off_mac(self):
+        with mock.patch.object(workshop.osenv, "IS_MAC", False):
+            self.assertFalse(workshop._convert_with_os(b"\xff\xd8\xff", os.path.join(tempfile.mkdtemp(), "x"), 96))
+
+
+class TestPrunePreviews(unittest.TestCase):
+    def test_removes_only_what_it_should(self):
+        d = tempfile.mkdtemp()
+        sub = os.path.join(d, "keep-me-folder")
+        os.makedirs(sub)
+        old = time.time() - 40 * 86400
+        files = {
+            "1.322": None, "1.thumb": None, "1.thumb.52x52.png": None, "1.preview": None,   # current: keep
+            "1.322.52x52.png": None,                                                          # copy of a source that exists: keep
+            "2.img": None, "2.img.168x168.png": None,                                         # older versions: remove
+            "3.thumb": None, "3.thumb.52x52.png": None, "3.preview": None,                    # no 3.322: remove
+            "4.322.52x52.png": None,                                                          # copy of a missing source: remove
+            "5.322.123.456.tmp": None,                                                        # fresh temp file: keep
+            "6.322.1.2.tmp": "old", "6.preview.src.jpg": "old",                               # old temp files: remove
+            "7.322": "old", "7.thumb": "old",                                                 # unused for 40 days: remove
+        }
+        for name, age in files.items():
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(b"x" * 10)
+            if age:
+                os.utime(os.path.join(d, name), (old, old))
+        with mock.patch.object(workshop, "PREVIEW_DIR", d):
+            removed, freed = workshop.prune_previews()
+        left = sorted(os.listdir(d))
+        self.assertEqual(left, sorted(["1.322", "1.thumb", "1.thumb.52x52.png", "1.preview", "1.322.52x52.png",
+                                       "5.322.123.456.tmp", "keep-me-folder"]))
+        self.assertEqual((removed, freed), (10, 100))
+        self.assertTrue(os.path.isdir(sub))
+
+    def test_missing_folder(self):
+        with mock.patch.object(workshop, "PREVIEW_DIR", os.path.join(tempfile.mkdtemp(), "nope")):
+            self.assertEqual(workshop.prune_previews(), (0, 0))
+
+
+class TestReplaceInUse(unittest.TestCase):
+    """Windows refuses to replace a file another thread has open; the download must cope."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.src, self.dest = os.path.join(self.tmp, "new.tmp"), os.path.join(self.tmp, "pic.322")
+        write(self.src, "new")
+
+    def test_retries_until_the_file_is_free(self):
+        real, calls = os.replace, []
+
+        def busy_twice(a, b):
+            calls.append(1)
+            if len(calls) < 3:
+                raise PermissionError("in use")
+            real(a, b)
+        with mock.patch.object(workshop.os, "replace", busy_twice), mock.patch.object(workshop.time, "sleep"):
+            workshop._replace(self.src, self.dest)
+        self.assertEqual(read(self.dest), "new")
+
+    def test_keeps_the_existing_copy_when_still_in_use(self):
+        write(self.dest, "old")
+        with mock.patch.object(workshop.os, "replace", side_effect=PermissionError("in use")), \
+                mock.patch.object(workshop.time, "sleep"):
+            workshop._replace(self.src, self.dest)
+        self.assertEqual(read(self.dest), "old")
+        self.assertFalse(os.path.exists(self.src))
+
+    def test_fails_when_nothing_could_be_written(self):
+        with mock.patch.object(workshop.os, "replace", side_effect=PermissionError("in use")), \
+                mock.patch.object(workshop.time, "sleep"):
+            with self.assertRaises(OSError):
+                workshop._replace(self.src, self.dest)
 
 
 if __name__ == "__main__":
