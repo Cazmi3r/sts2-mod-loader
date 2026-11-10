@@ -1664,7 +1664,7 @@ class Window:
                     "They get it from ••• → Copy my mod list code. Pasting their whole message works too.")
         box = tk.Frame(dlg.body, bg=C["border"], padx=1, pady=1)
         box.pack(fill="both", expand=True, pady=(14, 0))
-        text = tk.Text(box, height=5, wrap="char", font=F["mono"], bg=C["input"], fg=C["fg"], relief="flat",
+        text = tk.Text(box, height=5, width=1, wrap="char", font=F["mono"], bg=C["input"], fg=C["fg"], relief="flat",
                        bd=0, highlightthickness=0, insertbackground=C["fg"], padx=8, pady=6)
         text.pack(fill="both", expand=True)
         if found:
@@ -1699,8 +1699,7 @@ class Window:
         st = self.state
         diff = profiles.compare(theirs, st.states(), st.mods, st.game)
 
-        dlg = Dialog(self.root, "Compare mod lists", width=640)
-        dlg.geometry("660x600")
+        dlg = Dialog(self.root, "Compare mod lists", width=520)
         scroll = ScrollFrame(dlg.body)
         scroll.pack(fill="both", expand=True)
         dt = Details(scroll)
@@ -1750,6 +1749,7 @@ class Window:
         if diff["optional_only"]:
             dt.text(f"{plural(len(diff['optional_only']), 'client-side mod')} differ too, which doesn't "
                     "matter for co-op.", dim=True, pady=(14, 0))
+        dlg.fit_scroll(scroll)              # as tall as the content needs, scrolling past 60% of the screen
         match = dlg.button("Match their setup", 1, "primary")
         match.set_enabled(bool(diff["disabled"] or diff["extra"]))
         Tooltip(match, "Enable the mods they use that you have, and disable gameplay mods they don't have. "

@@ -596,6 +596,7 @@ class Dialog(tk.Toplevel):
         self.resizable(True, True)
         self.result = None
         self.minsize(width, 10)
+        self.width = width
         self.body = tk.Frame(self, bg=C["surface"], padx=22, pady=18)
         self.body.pack(fill="both", expand=True)
         self.footer = tk.Frame(self, bg=C["surface2"], padx=16, pady=10)
@@ -623,7 +624,28 @@ class Dialog(tk.Toplevel):
         self.grab_release()
         self.destroy()
 
+    def _wrap_labels(self):
+        # Wrapping text asks for room to fit on one line until it learns its width, which made
+        # dialogs open far wider than intended. Wrap at the intended width from the start.
+        stack = list(self.body.winfo_children())
+        while stack:
+            w = stack.pop()
+            if isinstance(w, WrapLabel):
+                w.configure(wraplength=self.width - 2 * 22 - 4)
+            stack.extend(w.winfo_children())
+
+    def fit_scroll(self, scroll, max_share=0.6, min_h=40):
+        """Size a ScrollFrame in this dialog to its content: as tall as needed, up to
+        max_share of the screen height, scrolling beyond that."""
+        self._wrap_labels()
+        self.update_idletasks()
+        need = scroll.body.winfo_reqheight()
+        room = int(self.winfo_screenheight() * max_share)
+        bar = scroll.vsb.winfo_reqwidth() if need > room else 0     # leave room for the scroll bar
+        scroll.canvas.configure(width=self.width - 2 * 22 - bar, height=max(min_h, min(need, room)))
+
     def run(self):
+        self._wrap_labels()
         self.update_idletasks()
         p = self.master.winfo_toplevel()
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
