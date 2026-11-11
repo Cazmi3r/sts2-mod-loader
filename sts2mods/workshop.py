@@ -305,7 +305,8 @@ def preview_path(wid, url, thumb=False):
     Both come from one small download (_source). Most are JPEG, which Tk can only show with
     Pillow: with Pillow (or when Steam sent a PNG) that file is used directly. Without it,
     macOS makes a PNG of the right size with sips; elsewhere ask the image server for a
-    PNG (imformat=png, full size; load_image shrinks and caches it)."""
+    PNG (imformat=png, full size; load_image shrinks and caches it). The server refuses that
+    for some images; then the JPEG itself is returned and needs_pillow() is true for it."""
     if not url:
         return None
     os.makedirs(PREVIEW_DIR, exist_ok=True)
@@ -325,9 +326,19 @@ def preview_path(wid, url, thumb=False):
             with open(out, "wb") as f:
                 f.write(png)
             return out
-        return None
+        return src                     # a JPEG only Pillow can show: needs_pillow(src)
     except OSError:
         return None
+
+
+def needs_pillow(path):
+    """True for a downloaded picture that can't be shown because Pillow isn't installed."""
+    return bool(path) and not _have_pillow() and _is_jpeg(path)
+
+
+PILLOW_HINT = ("Some pictures can't be shown because Pillow isn't installed. Install it with "
+               + ("py -m pip install pillow" if osenv.IS_WINDOWS else "python3 -m pip install pillow")
+               + " and restart the app.")
 
 
 _BB = [

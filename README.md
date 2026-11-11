@@ -6,8 +6,8 @@ anything: it reads the game's own files and edits only the game's `settings.save
 same file the in-game mod menu writes.
 
 Pure Python 3 with Tk (Python's built-in window toolkit). One codebase for every OS, no
-.NET. [Pillow](https://pypi.org/project/pillow/) is optional: with it installed, Workshop
-previews that are JPEGs show up too.
+.NET. [Pillow](https://pypi.org/project/pillow/) is optional, but without it some Workshop
+pictures can't be shown: the *Get mods* page says so when that happens.
 
 Dark theme by default. Set `STS2ML_THEME=light` for light, or `STS2ML_THEME=auto` to follow
 the desktop.

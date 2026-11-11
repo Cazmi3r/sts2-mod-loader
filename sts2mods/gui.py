@@ -472,9 +472,11 @@ class BrowsePage(tk.Frame):
         self.status = tk.Label(bar, text="", fg=C["dim"], bg=C["surface"], font=F["small"])
         self.status.pack(side="left", padx=(6, 0))
         tk.Frame(self, bg=C["border"], height=1).pack(fill="x")
+        self.pillow_notice = InfoBar(self, "info")      # shown once a picture needs Pillow
+        self.pillow_notice.label.configure(text=workshop.PILLOW_HINT)
 
-        paned = tk.PanedWindow(self, orient="horizontal", sashwidth=5, bg=C["border"], bd=0,
-                               sashrelief="flat", showhandle=False, opaqueresize=True)
+        self.paned = paned = tk.PanedWindow(self, orient="horizontal", sashwidth=5, bg=C["border"], bd=0,
+                                            sashrelief="flat", showhandle=False, opaqueresize=True)
         paned.pack(fill="both", expand=True)
         self.list = ScrollFrame(paned)
         self.placeholder = tk.Label(self.list.body, text="", fg=C["faint"], bg=C["surface"], font=F["hint"],
@@ -583,7 +585,13 @@ class BrowsePage(tk.Frame):
                 img = load_image(path, 52, 52)
                 if img:
                     row.set_thumb(img)
+                elif workshop.needs_pillow(path):
+                    self._show_pillow_notice()
         self.win.pictures.submit(lambda: workshop.preview_path(row.wid, url, thumb=True), done)
+
+    def _show_pillow_notice(self):
+        if not self.pillow_notice.winfo_manager():
+            self.pillow_notice.pack(fill="x", before=self.paned)
 
     def refresh_installed(self):
         for row in self.rows.values():
@@ -1660,9 +1668,11 @@ class Window:
                 # integer zoom/subsample: about 1.75x, up to PREVIEW_PX
                 z = max(1, round(self.PREVIEW_PX / small.width() * 4))
                 put(small.zoom(z).subsample(4) if z > 4 else small, False)
-        self.pictures.submit(lambda: workshop.preview_path(wid, url),
-                             lambda path: put(load_image(path, self.PREVIEW_PX, self.PREVIEW_PX), True)
-                             if path else None)
+        def done(path):
+            if not path:
+                return
+            put(load_image(path, self.PREVIEW_PX, self.PREVIEW_PX), True)
+        self.pictures.submit(lambda: workshop.preview_path(wid, url), done)
 
     # ---- actions -------------------------------------------------------------------------
 

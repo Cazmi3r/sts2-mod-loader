@@ -457,6 +457,40 @@ class TestPreviewConversion(unittest.TestCase):
             self.assertFalse(workshop._convert_with_os(b"\xff\xd8\xff", os.path.join(tempfile.mkdtemp(), "x"), 96))
 
 
+class TestNeedsPillow(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.jpeg = os.path.join(self.d, "1.322")
+        with open(self.jpeg, "wb") as f:
+            f.write(b"\xff\xd8\xff jpeg")
+
+    def test_only_a_jpeg_without_pillow(self):
+        png = os.path.join(self.d, "2.322")
+        with open(png, "wb") as f:
+            f.write(workshop.PNG_MAGIC)
+        with mock.patch.object(workshop, "_have_pillow", return_value=False):
+            self.assertTrue(workshop.needs_pillow(self.jpeg))
+            self.assertFalse(workshop.needs_pillow(png))
+            self.assertFalse(workshop.needs_pillow(None))
+        with mock.patch.object(workshop, "_have_pillow", return_value=True):
+            self.assertFalse(workshop.needs_pillow(self.jpeg))
+
+    def _preview(self, **source):
+        with mock.patch.object(workshop, "PREVIEW_DIR", self.d), mock.patch.object(workshop, "_have_pillow", return_value=False), \
+                mock.patch.object(workshop, "_convert_with_os", return_value=False), \
+                mock.patch.object(workshop, "_source", **source), \
+                mock.patch.object(workshop, "_download", return_value=b"\xff\xd8\xff refused"):
+            return workshop.preview_path("1", "https://img.example/x/", thumb=True)
+
+    def test_a_refused_picture_comes_back_as_the_jpeg(self):
+        path = self._preview(return_value=self.jpeg)
+        self.assertEqual(path, self.jpeg)
+
+    def test_a_failed_download_is_not_reported_as_needing_pillow(self):
+        self.assertIsNone(self._preview(side_effect=OSError("offline")))
+
+
 class TestPrunePreviews(unittest.TestCase):
     def test_removes_only_what_it_should(self):
         d = tempfile.mkdtemp()
