@@ -117,16 +117,19 @@ def apply_theme(root, dark=None):
            bordercolor=[("focus", C["accent"]), ("active", C["faint"])],
            lightcolor=[("focus", C["accent"])], arrowcolor=[("active", C["fg"])])
     for orient in ("Vertical", "Horizontal"):
-        st.configure(f"{orient}.TScrollbar", background=blend(C["fg"], C["surface"], 0.22),
-                     troughcolor=C["surface"], bordercolor=C["surface"], lightcolor=C["surface"],
-                     darkcolor=C["surface"], arrowcolor=C["surface"], gripcount=0, arrowsize=0)
-        st.map(f"{orient}.TScrollbar", background=[("active", blend(C["fg"], C["surface"], 0.4))])
+        track = blend(C["fg"], C["surface"], 0.06)     # no grip lines: gripcount on Tk 8.6, gripsize on Tk 9
+        st.configure(f"{orient}.TScrollbar", background=blend(C["fg"], C["surface"], 0.55),
+                     troughcolor=track, bordercolor=track, lightcolor=track,
+                     darkcolor=track, arrowcolor=track, gripcount=0, gripsize=0, arrowsize=0)
+        st.map(f"{orient}.TScrollbar", background=[("active", blend(C["fg"], C["surface"], 0.75))])
     try:   # slim scrollbars without arrow buttons
         st.layout("Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
             ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
     except tk.TclError:
         pass
-    st.configure("Vertical.TScrollbar", width=10)
+    # clam sizes the bar from arrowsize; with 0 it was 1px wide and effectively invisible.
+    # The layout above has no arrow buttons, so none are drawn.
+    st.configure("Vertical.TScrollbar", width=10, arrowsize=10)
 
 
 # ---- drawing helpers ----------------------------------------------------------------------
@@ -403,7 +406,8 @@ class ScrollFrame(tk.Frame):
         if float(first) <= 0 and float(last) >= 1:
             self.vsb.pack_forget()
         elif not self.vsb.winfo_ismapped():
-            self.vsb.pack(side="right", fill="y")
+            # before= the canvas: packed after it, the bar got whatever width was left (1px)
+            self.vsb.pack(side="right", fill="y", before=self.canvas)
 
     def scroll(self, units):
         if self.body.winfo_reqheight() > self.canvas.winfo_height():
