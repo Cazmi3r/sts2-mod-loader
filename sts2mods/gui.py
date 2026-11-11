@@ -19,7 +19,7 @@ from . import settings as settings_mod
 from .logscan import S_ERROR, S_OK, S_STALE, S_UNTESTED, S_WARN, STATUS_RANK
 from .ui import (C, F, ChoiceList, Dialog, InfoBar, Pill, ReadOnlyText, ScrollFrame, SearchEntry, Select, Spinner,
                  Toggle, Tooltip, WrapLabel, apply_theme, app_icon, badge, blend, install_wheel,
-                 load_image, soft)
+                 load_image, px, soft)
 
 S_CHECKING = "checking"
 STATUS_TEXT = {
@@ -482,8 +482,8 @@ class BrowsePage(tk.Frame):
         self.more = Pill(self.list.body, "Load more", lambda: self.load_page(self.page_no + 1))
         self.details = ScrollFrame(paned, padx=28, pady=22)
         self.dt = Details(self.details)
-        paned.add(self.list, minsize=320, width=460, stretch="never")
-        paned.add(self.details, minsize=360, stretch="always")
+        paned.add(self.list, minsize=px(320), width=px(460), stretch="never")
+        paned.add(self.details, minsize=px(360), stretch="always")
         self.show_intro()
 
     # ---- searching -----------------------------------------------------------------------
@@ -750,7 +750,7 @@ class Window:
         w = min(1340, root.winfo_screenwidth() - 40)
         h = min(820, root.winfo_screenheight() - 80)
         root.geometry(f"{w}x{h}")
-        root.minsize(900, 560)
+        root.minsize(min(900, w), min(560, h))
         self.icon = app_icon(root)
         try:
             root.iconphoto(True, self.icon)
@@ -775,6 +775,7 @@ class Window:
 
         install_wheel(root)
         self._build()
+        self._size_window()
         self._bind_keys()
         self.populate()
         self.start_health_check()
@@ -861,9 +862,24 @@ class Window:
         close.bind("<Button-1>", lambda e: self.toast_frame.place_forget())
         self.show_page("installed")
 
+    def _top_bar_need(self):
+        """Width the top bar needs for the tabs and the controls on the right (not the title)."""
+        return 32 + self.tabs.winfo_reqwidth() + self.play_btn.master.winfo_reqwidth() + 28 + 16
+
+    def _size_window(self):
+        """Size the window from what the top bar really needs. Text grows with the display's
+        scaling on Windows and Linux (150%, 200%), so fixed pixel sizes would cut off the tabs."""
+        root = self.root
+        root.update_idletasks()
+        need = self._top_bar_need()
+        max_w, max_h = root.winfo_screenwidth() - 40, root.winfo_screenheight() - 80
+        w = min(max(px(1340), need + self.titles.winfo_reqwidth()), max_w)
+        h = min(px(820), max_h)
+        root.geometry(f"{w}x{h}")
+        root.minsize(min(max(px(900), need), max_w), min(px(560), h))
+
     def _fit_top_bar(self, width):
-        right = self.play_btn.master
-        need = 32 + self.tabs.winfo_reqwidth() + right.winfo_reqwidth() + 28 + 16
+        need = self._top_bar_need()
         show = width >= need + self.titles.winfo_reqwidth()
         if show and not self.titles.winfo_manager():
             self.titles.pack(side="left", before=self.tabs)
@@ -904,8 +920,8 @@ class Window:
                               font=F["hint"])
         self.details = ScrollFrame(paned, padx=28, pady=22)
         self.dt = Details(self.details, cache_size=24)
-        paned.add(self.list, minsize=340, width=470, stretch="never")
-        paned.add(self.details, minsize=360, stretch="always")
+        paned.add(self.list, minsize=px(340), width=px(470), stretch="never")
+        paned.add(self.details, minsize=px(360), stretch="always")
 
     def _build_menu(self):
         m = tk.Menu(self.root, tearoff=False)
@@ -2272,6 +2288,10 @@ def run():
     win = Window(root)
     win.refresh_profiles()
     root.mainloop()
-    sys.stdout.flush()
-    sys.stderr.flush()
+    for stream in (sys.stdout, sys.stderr):     # both are None in windowed builds (the .exe, pythonw)
+        try:
+            if stream is not None:
+                stream.flush()
+        except (OSError, ValueError):
+            pass
     os._exit(0)   # background threads may be blocked on network I/O

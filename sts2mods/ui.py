@@ -26,6 +26,13 @@ DARK = dict(
 )
 C = dict(LIGHT)      # the active palette; filled in by apply_theme()
 F = {}               # named fonts
+SCALE = [1.0]        # display scaling (1.5 at 150%); set by apply_theme()
+
+
+def px(n):
+    """A layout size in pixels, grown with the display's scaling. On Windows and Linux text
+    gets bigger at 125%/150%/200% while plain pixel sizes don't; macOS scales both itself."""
+    return round(n * SCALE[0])
 
 
 def blend(color, other, amount):
@@ -52,6 +59,10 @@ def apply_theme(root, dark=None):
     C.clear()
     C.update(DARK if dark else LIGHT)
 
+    try:
+        SCALE[0] = 1.0 if osenv.IS_MAC else max(1.0, root.winfo_fpixels("1i") / 96)
+    except tk.TclError:
+        SCALE[0] = 1.0
     default = tkfont.nametofont("TkDefaultFont")
     if osenv.IS_WINDOWS:
         family, size, mono = "Segoe UI", 10, _pick_family(root, ["Cascadia Mono", "Consolas"], "Courier New")
@@ -62,7 +73,7 @@ def apply_theme(root, dark=None):
                               default.actual("family"))
         size = 10
         mono = _pick_family(root, ["JetBrains Mono", "Ubuntu Mono", "DejaVu Sans Mono", "Noto Sans Mono"],
-                            "TkFixedFont")
+                            "monospace")
     for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
         tkfont.nametofont(name).configure(family=family, size=size)
     F.update(
