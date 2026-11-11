@@ -3,6 +3,7 @@
 
 import os
 import queue
+from collections import OrderedDict
 import sys
 import threading
 import time
@@ -232,7 +233,7 @@ class Row(tk.Frame):
             bound.add(str(w))
             w.bind("<Button-1>", lambda e: self.on_select(), add="+")
             w.bind("<Enter>", lambda e: self._hover(True), add="+")
-            w.bind("<Leave>", lambda e: self._hover(False), add="+")
+            w.bind("<Leave>", lambda e: self.after_idle(self._check_leave), add="+")
 
     def _descendants(self, w):
         out = []
@@ -240,6 +241,18 @@ class Row(tk.Frame):
             out.append(c)
             out += self._descendants(c)
         return out
+
+    def _check_leave(self):
+        """Moving between a row's own labels fires Leave then Enter; only un-hover when the
+        pointer really left the row."""
+        try:
+            w = self.winfo_containing(*self.winfo_pointerxy())
+        except (tk.TclError, KeyError):
+            w = None
+        while w is not None and w is not self:
+            w = getattr(w, "master", None)
+        if w is None:
+            self._hover(False)
 
     def _hover(self, on):
         if on != self.hovered:
@@ -264,14 +277,51 @@ class Row(tk.Frame):
 
 
 class Details:
-    """Helpers for building a details pane inside a ScrollFrame."""
+    """Helpers for building a details pane inside a ScrollFrame.
 
-    def __init__(self, scroll):
+    With cache_size > 0, each page is built in its own frame and the last few are kept, so
+    going back to a page shows it instantly instead of rebuilding every widget. A page is
+    reused only while its `gen` matches (callers bump gen whenever the data changes)."""
+
+    def __init__(self, scroll, cache_size=0):
         self.scroll = scroll
         self.d = scroll.body
+        self.cache_size = cache_size
+        self.cache = OrderedDict()      # key -> (gen, frame)
+        self.current = None
 
-    def clear(self):
-        self.scroll.clear()
+    def clear(self, key=None, gen=None):
+        if not self.cache_size:
+            self.scroll.clear()
+            return
+        if self.current is not None:
+            self.current.pack_forget()
+        key = ("page", key)
+        old = self.cache.pop(key, None)
+        if old:
+            old[1].destroy()
+        for k in [k for k, (g, _) in self.cache.items() if g != gen]:
+            self.cache.pop(k)[1].destroy()
+        while len(self.cache) >= self.cache_size:
+            self.cache.popitem(last=False)[1][1].destroy()
+        frame = tk.Frame(self.scroll.body, bg=C["surface"])
+        frame.pack(fill="x")
+        self.cache[key] = (gen, frame)
+        self.d = self.current = frame
+        self.scroll.to_top()
+
+    def show_cached(self, key, gen):
+        """Show a remembered page. Returns False if it has to be built (again)."""
+        entry = self.cache.get(("page", key))
+        if not self.cache_size or not entry or entry[0] != gen:
+            return False
+        if self.current is not None and self.current is not entry[1]:
+            self.current.pack_forget()
+        self.cache.move_to_end(("page", key))
+        self.d = self.current = entry[1]
+        self.current.pack(fill="x")
+        self.scroll.to_top()
+        return True
 
     def title(self, text, parent=None):
         lb = WrapLabel(parent or self.d, text, font=F["title"])
@@ -666,6 +716,8 @@ class Window:
         self.state = State()
         self.rows = {}
         self.selected = None
+        self.detail_gen = 0      # bumped whenever anything a details page shows may have changed
+        self.visible_ids = []    # mod list rows in display order
         self.health_gen = 0
         self.running = game_mod.is_running()
         self.subscribing, self.downloading = set(), set()
@@ -789,7 +841,7 @@ class Window:
         self.empty = tk.Label(self.list.body, text="No mods match.", fg=C["faint"], bg=C["surface"],
                               font=F["hint"])
         self.details = ScrollFrame(paned, padx=28, pady=22)
-        self.dt = Details(self.details)
+        self.dt = Details(self.details, cache_size=24)
         paned.add(self.list, minsize=340, width=470, stretch="never")
         paned.add(self.details, minsize=360, stretch="always")
 
@@ -863,6 +915,7 @@ class Window:
             self.show_overview()
 
     def refresh_chrome(self):
+        self.detail_gen += 1
         st, g = self.state, self.state.game
         enabled = sum(1 for m in st.mods if st.enabled(m))
         self.subtitle.configure(text=f"Game {g.version_text} · {g.branch} · {enabled}/{len(st.mods)} enabled")
@@ -1148,6 +1201,9 @@ class Window:
         if not hasattr(self, "rows"):
             return
         ids = sorted((m for m in self.rows if self._visible(m)), key=self._sort_key)
+        if ids == self.visible_ids and all(self.rows[m].winfo_manager() for m in ids):
+            return                   # nothing moved: skip re-packing every row
+        self.visible_ids = ids
         for r in self.rows.values():
             r.pack_forget()
         self.empty.pack_forget()
@@ -1168,7 +1224,9 @@ class Window:
 
     def show_overview(self):
         dt, st = self.dt, self.state
-        dt.clear()
+        if dt.show_cached("overview", self.detail_gen):
+            return
+        dt.clear("overview", self.detail_gen)
         dt.title("Overview")
         if not st.report:
             dt.text("Checking your mods: reading game logs and each mod's code…", dim=True, pady=(8, 0))
@@ -1223,7 +1281,11 @@ class Window:
         if mod is None:
             return
         y = self.details.canvas.yview()[0] if keep_scroll else 0
-        dt.clear()
+        if keep_scroll:
+            self.detail_gen += 1        # a refresh: the data behind the page changed
+        elif dt.show_cached(mod_id, self.detail_gen):
+            return
+        dt.clear(mod_id, self.detail_gen)
         info = st.workshop_info(mod) or {}
 
         head = tk.Frame(dt.d, bg=C["surface"])

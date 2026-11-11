@@ -388,8 +388,12 @@ class ScrollFrame(tk.Frame):
     def __init__(self, parent, bg=None, padx=0, pady=0):
         bg = bg or C["surface"]
         super().__init__(parent, bg=bg)
-        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, yscrollincrement=24)
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        # yscrollincrement=1 lets the view move by single pixels, so scrolling glides
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, yscrollincrement=1)
+        self._target = None       # pixel offset a smooth scroll is heading to
+        self._anim = None
+        self.vsb = ttk.Scrollbar(self, orient="vertical",
+                                 command=lambda *a: (self._stop(), self.canvas.yview(*a)))
         self.body = tk.Frame(self.canvas, bg=bg, padx=padx, pady=pady)
         self._win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
         self.canvas.configure(yscrollcommand=self._on_scroll)
@@ -409,17 +413,52 @@ class ScrollFrame(tk.Frame):
             # before= the canvas: packed after it, the bar got whatever width was left (1px)
             self.vsb.pack(side="right", fill="y", before=self.canvas)
 
-    def scroll(self, units):
-        if self.body.winfo_reqheight() > self.canvas.winfo_height():
-            self.canvas.yview_scroll(units, "units")
+    def _max_offset(self):
+        return max(0, self.body.winfo_reqheight() - self.canvas.winfo_height())
+
+    def scroll(self, pixels):
+        """Scroll smoothly by `pixels` (positive = down). Repeated calls add up, so a fast flick
+        or a run of trackpad events keeps gliding instead of jumping in steps."""
+        top = self._max_offset()
+        if top <= 0:
+            return
+        start = self._target if self._target is not None else self.canvas.canvasy(0)
+        self._target = max(0.0, min(float(top), start + pixels))
+        if self._anim is None:
+            self._step()
+
+    def _step(self):
+        self._anim = None
+        if self._target is None:
+            return
+        cur = self.canvas.canvasy(0)
+        gap = self._target - cur
+        if abs(gap) < 1:
+            self._target = None
+            return
+        move = gap * 0.35
+        move = int(move) if abs(move) >= 1 else (1 if gap > 0 else -1)
+        self.canvas.yview_scroll(move, "units")
+        if self.canvas.canvasy(0) == cur:      # hit an end
+            self._target = None
+            return
+        self._anim = self.after(12, self._step)
+
+    def _stop(self):
+        self._target = None
+        if self._anim is not None:
+            self.after_cancel(self._anim)
+            self._anim = None
 
     def to_top(self):
+        self._stop()
         self.canvas.yview_moveto(0)
 
     def see(self, widget):
         """Scroll so widget (a child of body) is visible."""
         self.update_idletasks()
         total = max(1, self.body.winfo_reqheight())
+        self._stop()
         y, h = widget.winfo_y(), widget.winfo_height()
         top = self.canvas.canvasy(0)
         view = self.canvas.winfo_height()
@@ -434,26 +473,44 @@ class ScrollFrame(tk.Frame):
         self.to_top()
 
 
+WHEEL_STEP = 60       # pixels per mouse wheel notch
+MAC_DELTA_PX = 14     # pixels per unit of macOS wheel/trackpad delta
+
+
 def install_wheel(root):
     """Route the mouse wheel to the ScrollFrame under the pointer, on every platform."""
-    def handler(e):
+    # Tk 8.7+ (Tk 9, as in Homebrew's Python) reports wheel notches as 120 on every system and
+    # sends trackpad scrolling as separate <TouchpadScroll> events with pixel deltas.
+    tk_version = tuple(int(x) for x in str(root.tk.call("info", "patchlevel")).split(".")[:2])
+    per_notch_120 = tk_version >= (8, 7) or not osenv.IS_MAC
+
+    def handler(e, touch=False):
         w = root.winfo_containing(e.x_root, e.y_root)
         while w is not None and not isinstance(w, ScrollFrame):
             w = getattr(w, "master", None)
         if w is None:
             return
+        # One wheel notch scrolls the same distance on every system (WHEEL_STEP pixels);
+        # trackpads send many small events and scroll proportionally.
         if e.num == 4:
-            units = -2
+            pixels = -WHEEL_STEP
         elif e.num == 5:
-            units = 2
-        elif osenv.IS_MAC:
-            units = -e.delta
+            pixels = WHEEL_STEP
+        elif touch:
+            pixels = -float(root.tk.call("tk::PreciseScrollDeltas", e.delta)[1])   # (dx, dy)
+        elif per_notch_120:
+            pixels = -e.delta / 120 * WHEEL_STEP  # Windows, and every system on Tk 8.7+
         else:
-            units = -int(e.delta / 120) * 2 or (-1 if e.delta > 0 else 1)
-        w.scroll(units)
+            pixels = -e.delta * MAC_DELTA_PX      # Tk 8.6 on macOS: delta is ±1 per line
+        w.scroll(pixels)
     root.bind_all("<MouseWheel>", handler, add="+")
     root.bind_all("<Button-4>", handler, add="+")
     root.bind_all("<Button-5>", handler, add="+")
+    if tk_version >= (8, 7):
+        try:
+            root.bind_all("<TouchpadScroll>", lambda e: handler(e, touch=True), add="+")
+        except tk.TclError:
+            pass
 
 
 class SearchEntry(ttk.Entry):
