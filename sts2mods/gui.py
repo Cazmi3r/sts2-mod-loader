@@ -1,6 +1,7 @@
 """Tk front end. Runs the same on Linux, Windows and macOS with only Python's standard library
 (Pillow, if installed, adds JPEG previews)."""
 
+import json
 import os
 import queue
 from collections import OrderedDict
@@ -36,12 +37,36 @@ def status_color(status):
     return {S_ERROR: C["error"], S_WARN: C["warn"], S_STALE: C["stale"], S_OK: C["ok"]}.get(status, C["faint"])
 
 
-FILTERS = [("all", "All mods"), ("enabled", "Enabled"), ("disabled", "Disabled"),
+FILTERS = [("all", "All mods"), ("current", "Current mods"), ("disabled", "Disabled"),
            ("problems", "Problems"), ("changed", "Unapplied changes"),
            ("workshop", "Workshop"), ("local", "Local folder")]
 SORTS = [("name", "Sort: Name"), ("status", "Sort: Status"), ("order", "Sort: Load order"),
          ("updated", "Sort: Recently updated"), ("size", "Sort: Size")]
 MOD = "Command" if osenv.IS_MAC else "Control"
+DEFAULT_FILTER = "all"     # the first start shows everything; the last view picked is remembered
+UI_PREFS_PATH = os.path.join(osenv.config_dir(), "ui.json")   # small view preferences
+
+
+def load_ui_prefs():
+    try:
+        with open(UI_PREFS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_ui_pref(key, value):
+    prefs = load_ui_prefs()
+    prefs[key] = value
+    try:
+        os.makedirs(os.path.dirname(UI_PREFS_PATH), exist_ok=True)
+        tmp = UI_PREFS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=2)
+        os.replace(tmp, UI_PREFS_PATH)
+    except OSError:
+        pass
 
 
 def human_size(n):
@@ -853,7 +878,10 @@ class Window:
         bar.pack(fill="x")
         self.search = SearchEntry(bar, "Search mods by name, ID, author or tag", on_change=self.refilter)
         self.search.pack(side="left", fill="x", expand=True)
-        self.filter = Select(bar, FILTERS, "all", on_change=self.refilter)
+        # Start on the view used last time; All mods the first time.
+        start = load_ui_prefs().get("filter")
+        start = start if start in dict(FILTERS) else DEFAULT_FILTER
+        self.filter = Select(bar, FILTERS, start, on_change=self._on_filter_picked)
         self.filter.pack(side="left", padx=(8, 0))
         self.sort = Select(bar, SORTS, "name", on_change=self.refilter)
         self.sort.pack(side="left", padx=(8, 0))
@@ -1194,7 +1222,9 @@ class Window:
         self.show_page("installed")
         if mod_id in self.rows:
             self.search.set("")
-            self.filter.set_key("all")
+            if not self._visible(mod_id):
+                self.filter.set_key("all", quiet=True)    # just for this jump; not remembered
+                self.refilter()
             self.select(mod_id)
             self.list.see(self.rows[mod_id])
 
@@ -1279,13 +1309,19 @@ class Window:
 
     # ---- filtering / sorting -------------------------------------------------------------
 
+    def _on_filter_picked(self):
+        save_ui_pref("filter", self.filter.key())     # remembered for next time
+        self.refilter()
+
     def _visible(self, mod_id):
         st, mod = self.state, self.state.mods.get(mod_id)
         if mod is None:
             return False
         f = self.filter.key()
         on = st.enabled(mod_id)
-        if f == "enabled" and not on or f == "disabled" and on:
+        # Current mods: the ones that are on, plus any with unapplied changes, so a mod you
+        # just switched off stays in view until you Apply.
+        if f == "current" and not (on or mod_id in st.pending) or f == "disabled" and on:
             return False
         if f == "problems" and st.status(mod_id) not in (S_ERROR, S_WARN):
             return False

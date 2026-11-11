@@ -44,7 +44,8 @@ folder in Applications once. The app tells you if this is needed.
 ## What it does
 
 - **One list of every mod**, from Steam Workshop and the game's local `mods/` folder,
-  with search, filters (problems, enabled, unapplied changes…) and sorting.
+  with search, filters (current mods, problems, unapplied changes…) and sorting. The view
+  you used last is remembered.
 - **Health check for every mod**, from three sources:
   - **Code check.** Each mod's compiled code is compared against *your installed*
     `sts2.dll` and library mods (BaseLib, RitsuLib…). If a mod calls a game function
