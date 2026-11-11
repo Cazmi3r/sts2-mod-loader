@@ -32,10 +32,14 @@ Or run `./sts2-mod-loader` directly.
 
 **macOS**
 
-1. Install Python 3 from [python.org](https://www.python.org/downloads/). Apple's built-in
-   Python has an outdated Tk that draws badly. With Homebrew, `brew install python-tk` works too.
+1. Install Python with Tk from [Homebrew](https://brew.sh): `brew install python-tk`. Apple's
+   built-in Python has an outdated Tk that draws badly.
 2. Double-click `STS2 Mod Loader.command`. The first time, macOS may ask you to allow it:
    right-click it → Open.
+
+Python from [python.org](https://www.python.org/downloads/) works too, but it starts without
+trusted certificates, so the Workshop can't be reached: run **Install Certificates.command** in its
+folder in Applications once. The app tells you if this is needed.
 
 ## What it does
 

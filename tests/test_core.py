@@ -354,5 +354,27 @@ class TestApiCheckOnRealGame(unittest.TestCase):
         self.assertFalse([mid for mid, r in res.items() if r.error], "metadata parse errors")
 
 
+class TestSslContext(unittest.TestCase):
+    def setUp(self):
+        from sts2mods import osenv
+        self.osenv = osenv
+
+    def test_missing_only_on_a_mac_python_without_certificates(self):
+        with mock.patch.object(self.osenv, "IS_MAC", True), \
+                mock.patch.object(self.osenv, "_python_has_ca_certs", return_value=False):
+            self.assertTrue(self.osenv.certificates_missing())
+        with mock.patch.object(self.osenv, "IS_MAC", True), \
+                mock.patch.object(self.osenv, "_python_has_ca_certs", return_value=True):
+            self.assertFalse(self.osenv.certificates_missing())
+        with mock.patch.object(self.osenv, "IS_MAC", False), \
+                mock.patch.object(self.osenv, "_python_has_ca_certs", return_value=False):
+            self.assertFalse(self.osenv.certificates_missing())
+
+    def test_uses_pythons_own_settings(self):
+        ctx = self.osenv.ssl_context()
+        self.assertIs(ctx, self.osenv.ssl_context())
+        self.assertEqual(ctx.verify_mode, __import__("ssl").CERT_REQUIRED)
+
+
 if __name__ == "__main__":
     unittest.main()

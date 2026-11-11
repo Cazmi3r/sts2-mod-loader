@@ -3,6 +3,7 @@ files, where Steam and the game's user data live, how to tell whether the game i
 and how to open folders and steam:// links."""
 
 import os
+import ssl
 import subprocess
 import sys
 
@@ -180,3 +181,41 @@ def prefers_dark():
         return "dark" in os.environ.get("GTK_THEME", "").lower()
     except OSError:
         return False
+
+
+# ---- secure connections -------------------------------------------------------------------
+
+_SSL_CONTEXT = None
+CERTIFICATES_HELP = ("This Python can't check secure connections (it has no trusted certificates), so the "
+                     "Steam Workshop can't be reached. Run \"Install Certificates.command\" from your Python "
+                     "folder in Applications, or use Homebrew's Python: brew install python-tk.")
+
+
+def _python_has_ca_certs():
+    """False when this Python's OpenSSL has no trusted certificates at all, as with the
+    python.org installer for macOS until 'Install Certificates.command' is run."""
+    paths = ssl.get_default_verify_paths()
+    for env in (paths.openssl_cafile_env, paths.openssl_capath_env):
+        if os.environ.get(env):
+            return True
+    if paths.cafile and os.path.isfile(paths.cafile):
+        return True
+    try:
+        return bool(paths.capath and os.listdir(paths.capath))
+    except OSError:
+        return False
+
+
+def certificates_missing():
+    """True when every secure request will fail because this Python has no certificates
+    (python.org's macOS installer, before Install Certificates.command). The app says so
+    rather than working around it."""
+    return IS_MAC and not _python_has_ca_certs()
+
+
+def ssl_context():
+    """The SSL context for every web request this app makes: Python's own default."""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT

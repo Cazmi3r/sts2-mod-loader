@@ -448,7 +448,8 @@ class BrowsePage(tk.Frame):
             self.spinner.stop()
             self.more.set_enabled(True)
             if result is None:
-                self._placeholder("Couldn't reach the Steam Workshop. Check your connection, then press "
+                self._placeholder(osenv.CERTIFICATES_HELP if osenv.certificates_missing() else
+                                  "Couldn't reach the Steam Workshop. Check your connection, then press "
                                   "Enter in the search box to try again.")
                 return
             ids, got_any, total, info = result
@@ -872,6 +873,8 @@ class Window:
         if st.settings and not st.settings.mods_enabled:
             gtexts.append("Mods are switched off globally in the game's settings.")
         gtexts += [f"{i.title}. {i.detail}" for i in gissues if i is not fs]
+        if osenv.certificates_missing():
+            gtexts.append(osenv.CERTIFICATES_HELP)
         self._bar(self.bar_global, "\n".join(gtexts))
 
         n = st.change_count()

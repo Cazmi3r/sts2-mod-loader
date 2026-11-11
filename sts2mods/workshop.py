@@ -53,7 +53,7 @@ def fetch_details(workshop_ids, force=False):
         req = urllib.request.Request(API, data=urllib.parse.urlencode(form).encode(),
                                      headers={"User-Agent": "sts2-mod-loader"})
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=TIMEOUT, context=osenv.ssl_context()) as resp:
                 items = json.load(resp)["response"]["publishedfiledetails"]
         except (OSError, ValueError, KeyError):
             break
@@ -119,7 +119,7 @@ def browse(query="", sort="trend", page=1):
     req = urllib.request.Request(BROWSE + "?" + urllib.parse.urlencode(params),
                                  headers={"User-Agent": "sts2-mod-loader", "Accept-Language": "en"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=osenv.ssl_context()) as resp:
             html = resp.read(16 * 1024 * 1024).decode("utf-8", "replace")
     except (OSError, ValueError):
         return None
@@ -154,21 +154,51 @@ def english_ratio(details):
     return sum(c.isascii() for c in letters) / len(letters)
 
 
+def _have_pillow():
+    try:
+        import PIL.Image  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _is_jpeg(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(3) == b"\xff\xd8\xff"
+    except OSError:
+        return False
+
+
+def _download(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "sts2-mod-loader"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT, context=osenv.ssl_context()) as resp:
+        return resp.read(8 * 1024 * 1024)
+
+
 def preview_path(wid, url, thumb=False):
     """Blocking download of a preview image into the cache. Returns a local path or None.
-    thumb asks Steam's image server for a small version (for list rows)."""
+    thumb asks Steam's image server for a small version (for list rows).
+
+    Most previews are JPEG, which Tk can only show with Pillow. Without Pillow, ask Steam's
+    image server for a PNG instead (imformat=png; it then sends the full size, which
+    load_image shrinks and caches)."""
     if not url:
         return None
     os.makedirs(PREVIEW_DIR, exist_ok=True)
     path = os.path.join(PREVIEW_DIR, f"{wid}.thumb" if thumb else f"{wid}.img")
-    if thumb:
-        url += ("&" if "?" in url else "?") + "imw=96&imh=96&ima=fit&impolicy=Letterbox&imcolor=%23000000&letterbox=true"
-    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 7 * 86400:
+    need_png = not _have_pillow()
+    fresh = os.path.exists(path) and time.time() - os.path.getmtime(path) < 7 * 86400
+    if fresh and not (need_png and _is_jpeg(path)):
         return path
+    sep = "&" if "?" in url else "?"
+    small = url + sep + "imw=96&imh=96&ima=fit&impolicy=Letterbox&imcolor=%23000000&letterbox=true"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "sts2-mod-loader"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            data = resp.read(8 * 1024 * 1024)
+        data = _download(small if thumb else url)
+        if need_png and data[:3] == b"\xff\xd8\xff":
+            png = _download(url + sep + "imformat=png")
+            if png[:8] == b"\x89PNG\r\n\x1a\n":
+                data = png
         with open(path, "wb") as f:
             f.write(data)
         return path

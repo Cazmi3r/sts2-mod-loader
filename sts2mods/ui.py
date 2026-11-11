@@ -3,6 +3,7 @@ rounded corners, scrollable panes and dialogs that look the same on Linux, Windo
 
 import base64
 import io
+import os
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -557,9 +558,23 @@ def load_image(path, max_w, max_h):
             head = f.read(8)
         if not (head.startswith(b"\x89PNG") or head.startswith(b"GIF8")):
             return None
+        # Shrinking a big image with Tk is slow, so keep the small copy next to the original.
+        small = f"{path}.{max_w}x{max_h}.png"
+        try:
+            if os.path.getmtime(small) >= os.path.getmtime(path):
+                return tk.PhotoImage(file=small)
+        except (OSError, tk.TclError):
+            pass
         img = tk.PhotoImage(file=path)
         factor = max(1, -(-img.width() // max_w), -(-img.height() // max_h))
-        return img.subsample(factor) if factor > 1 else img
+        if factor == 1:
+            return img
+        img = img.subsample(factor)
+        try:
+            img.write(small, format="png")
+        except tk.TclError:
+            pass
+        return img
     except (OSError, tk.TclError):
         return None
 
