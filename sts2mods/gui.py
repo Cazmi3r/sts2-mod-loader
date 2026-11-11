@@ -17,7 +17,7 @@ from . import game as game_mod
 from . import mods as mods_mod
 from . import settings as settings_mod
 from .logscan import S_ERROR, S_OK, S_STALE, S_UNTESTED, S_WARN, STATUS_RANK
-from .ui import (C, F, ChoiceList, Dialog, InfoBar, Pill, ReadOnlyText, ScrollFrame, SearchEntry, Select, Spinner,
+from .ui import (C, F, CheckList, ChoiceList, Dialog, InfoBar, Pill, PopupMenu, ReadOnlyText, ScrollFrame, SearchEntry, Select, Spinner,
                  Toggle, Tooltip, WrapLabel, apply_theme, app_icon, badge, blend, install_wheel,
                  load_image, px, soft)
 
@@ -852,13 +852,18 @@ class Window:
         self.browse = BrowsePage(self, self.pages)
         self._build_installed()
 
-        self.toast_frame = tk.Frame(root, bg=C["toast_bg"], padx=16, pady=10)
-        self.toast_label = tk.Label(self.toast_frame, bg=C["toast_bg"], fg=C["toast_fg"], wraplength=620,
-                                    justify="left")
+        # A small card at the bottom of the window, in the theme's colors.
+        self.toast_frame = tk.Frame(root, bg=blend(C["fg"], C["surface2"], 0.24), padx=1, pady=1)
+        card = tk.Frame(self.toast_frame, bg=C["surface2"])
+        card.pack(fill="both", expand=True)
+        tk.Frame(card, bg=C["accent"], width=3).pack(side="left", fill="y")
+        self.toast_label = tk.Label(card, bg=C["surface2"], fg=C["fg"], wraplength=620, justify="left",
+                                    padx=14, pady=10)
         self.toast_label.pack(side="left")
-        close = tk.Label(self.toast_frame, text="✕", bg=C["toast_bg"], fg=C["toast_fg"],
-                         padx=6)
-        close.pack(side="left", padx=(12, 0))
+        close = tk.Label(card, text="✕", bg=C["surface2"], fg=C["dim"], padx=12)
+        close.pack(side="left", fill="y")
+        close.bind("<Enter>", lambda e: close.configure(fg=C["fg"]))
+        close.bind("<Leave>", lambda e: close.configure(fg=C["dim"]))
         close.bind("<Button-1>", lambda e: self.toast_frame.place_forget())
         self.show_page("installed")
 
@@ -924,26 +929,25 @@ class Window:
         paned.add(self.details, minsize=px(360), stretch="always")
 
     def _build_menu(self):
-        m = tk.Menu(self.root, tearoff=False)
-        m.add_command(label="Delete a profile…", command=self.delete_profile_dialog)
-        m.add_separator()
-        m.add_command(label="Restore settings backup…", command=self.restore_dialog)
-        m.add_command(label="Open game logs folder", command=lambda: self.state.game.logs_dir and
-                      game_mod.open_path(self.state.game.logs_dir))
-        m.add_command(label="Open local mods folder", command=self.open_mods_folder)
-        m.add_command(label="Refresh", accelerator="F5", command=self.reload)
-        m.add_command(label="About", command=self.about)
-        self.menu = m
+        self.menu = PopupMenu(self.menu_btn, [
+            ("Delete profiles…", self.delete_profile_dialog),
+            None,
+            ("Restore settings backup…", self.restore_dialog),
+            ("Open game logs folder", lambda: self.state.game.logs_dir and
+             game_mod.open_path(self.state.game.logs_dir)),
+            ("Open local mods folder", self.open_mods_folder),
+            ("Refresh", self.reload, "F5"),
+            ("About", self.about),
+        ])
 
     def _open_menu(self):
-        b = self.menu_btn
-        self.menu.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height() + 4)
+        self.menu.open()
 
     def _bind_keys(self):
         r = self.root
         for seq, fn in ((f"<{MOD}-f>", self.focus_search), (f"<{MOD}-r>", self.reload), ("<F5>", self.reload),
                         (f"<{MOD}-s>", self.apply)):
-            r.bind_all(seq, lambda e, fn=fn: (fn(), "break")[1])
+            r.bind_all(seq, lambda e, fn=fn: (None if Dialog.stack else fn(), "break")[1])
         # List navigation. Same keys on every system.
         nav = {"<Up>": lambda: self.step_selection(-1), "<Down>": lambda: self.step_selection(1),
                "<Prior>": lambda: self.step_selection(-10), "<Next>": lambda: self.step_selection(10),
@@ -2018,21 +2022,35 @@ class Window:
         if not names:
             self.toast("No saved profiles.")
             return
-        dlg = Dialog(self.root, "Delete profile")
-        dlg.heading("Delete a profile")
-        sel = ChoiceList(dlg.body, [(n, n) for n in names], names[0])
+        # Tick as many as you like, then one Delete removes them all and closes the dialog.
+        dlg = Dialog(self.root, "Delete profiles")
+        all_key = "⌘A" if osenv.IS_MAC else "Ctrl+A"
+        dlg.heading("Delete profiles", f"Tick the profiles to delete. Shift-click ticks a range; {all_key} "
+                                       "ticks them all.")
+        picked = []
+
+        def changed():
+            picked[:] = sel.keys()
+            btn.set_text(f"Delete {plural(len(picked), 'profile')}" if picked else "Delete")
+            btn.set_enabled(bool(picked))
+
+        sel = CheckList(dlg.body, [(n, f"{n}   (active)" if n == self.active_profile else n) for n in names],
+                        on_change=changed)
         sel.pack(fill="x", pady=(14, 0))
         dlg.after(60, sel.focus_set)
-        dlg.button("Delete", 1, "danger")
+        btn = dlg.button("Delete", 1, "danger")
+        btn.set_enabled(False)
         dlg.button("Cancel", 0)
-        chosen = {}
-        sel.bind("<<ComboboxSelected>>", lambda e: chosen.update(k=sel.key()), add="+")
-        if dlg.run() == 1:
-            gone = chosen.get("k", names[0])
-            profiles.delete_profile(gone)
-            if gone == self.active_profile:
-                self._set_active_profile(None)
-            self.refresh_profiles()
+        dlg.bind("<Return>", lambda e: dlg.close(1) if picked else None)
+        if dlg.run() != 1 or not picked:
+            return
+        for name in picked:
+            profiles.delete_profile(name)
+        if self.active_profile in picked:
+            self._set_active_profile(None)
+        self.refresh_profiles()
+        self.toast(f"Deleted profile “{picked[0]}”." if len(picked) == 1 else
+                   f"Deleted {len(picked)} profiles.")
 
     # ---- co-op ---------------------------------------------------------------------------
 
@@ -2217,7 +2235,8 @@ class Window:
 
     def toast(self, text):
         self.toast_label.configure(text=text)
-        self.toast_frame.place(relx=0.5, y=74, anchor="n")
+        self.toast_label.configure(wraplength=max(200, min(px(620), self.root.winfo_width() - 120)))
+        self.toast_frame.place(relx=0.5, rely=1.0, y=-24, anchor="s")
         self.toast_frame.lift()
         if self._toast_job:
             self.root.after_cancel(self._toast_job)
@@ -2260,6 +2279,9 @@ class Window:
         dlg.run()
 
     def _on_close(self):
+        if Dialog.stack:
+            Dialog.stack[-1].close()
+            return
         if self.state.change_count():
             resp = self.ask("Apply changes before closing?",
                             "You have changes that haven't been written to the game's settings.",

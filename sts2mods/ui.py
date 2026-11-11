@@ -308,34 +308,64 @@ class Spinner(tk.Canvas):
 
 
 class Tooltip:
+    """A hint shown under a widget after the pointer rests on it. Drawn inside the window
+    (not a separate OS window), in the theme's colors."""
+
     def __init__(self, widget, text):
         self.widget, self.text, self.tip, self.job = widget, text, None, None
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
 
     def _schedule(self, _e):
+        self._hide()
         self.job = self.widget.after(550, self._show)
 
     def _show(self):
+        self.job = None
         if self.tip or not self.text:
             return
-        x = self.widget.winfo_rootx() + 8
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        self.tip = tk.Toplevel(self.widget)
-        self.tip.wm_overrideredirect(True)
-        self.tip.configure(bg=C["toast_bg"])
-        tk.Label(self.tip, text=self.text, bg=C["toast_bg"], fg=C["toast_fg"], font=F["small"],
-                 padx=8, pady=4, justify="left", wraplength=360).pack()
-        self.tip.wm_geometry(f"+{x}+{y}")
+        w = self.widget
+        win = w.winfo_toplevel()
+        tip = self.tip = tk.Frame(win, bg=blend(C["fg"], C["surface2"], 0.22), padx=1, pady=1)
+        tk.Label(tip, text=self.text, bg=C["surface2"], fg=C["fg"], font=F["small"], padx=9, pady=5,
+                 justify="left", wraplength=max(120, min(360, win.winfo_width() - 40))).pack()
+        tip.update_idletasks()
+        tw, th = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        x = w.winfo_rootx() - win.winfo_rootx() + 8
+        top = w.winfo_rooty() - win.winfo_rooty()
+        y = top + w.winfo_height() + 6
+        if y + th > win.winfo_height() - 8:          # no room below: show above
+            y = top - th - 6
+        tip.place(x=max(8, min(x, win.winfo_width() - tw - 8)), y=max(8, y))
+        tip.lift()
+        self.job = w.after(400, self._watch)
+
+    def _watch(self):
+        """Hide if the pointer left without a Leave event (the widget moved or was hidden)."""
+        self.job = None
+        try:
+            over = self.widget.winfo_containing(*self.widget.winfo_pointerxy())
+            shown = self.widget.winfo_viewable()
+        except (tk.TclError, KeyError):
+            over, shown = None, False
+        while over is not None and over is not self.widget:
+            over = getattr(over, "master", None)
+        if over is None or not shown:
+            self._hide()
+        else:
+            self.job = self.widget.after(400, self._watch)
 
     def _hide(self, _e=None):
-        if self.job:
-            self.widget.after_cancel(self.job)
-            self.job = None
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
+        try:
+            if self.job:
+                self.widget.after_cancel(self.job)
+            if self.tip:
+                self.tip.destroy()
+        except tk.TclError:
+            pass
+        self.job = self.tip = None
 
 
 class WrapLabel(tk.Label):
@@ -486,6 +516,16 @@ def install_wheel(root):
             w = getattr(w, "master", None)
         if w is None:
             return
+        try:
+            grab = root.grab_current()
+        except (tk.TclError, KeyError):
+            grab = None
+        if grab is not None and grab is not root:     # a dialog is open: only scroll inside it
+            inside = w
+            while inside is not None and inside is not grab:
+                inside = getattr(inside, "master", None)
+            if inside is None:
+                return
         # One wheel notch scrolls the same distance on every system (WHEEL_STEP pixels);
         # trackpads send many small events and scroll proportionally.
         if e.num == 4:
@@ -689,7 +729,7 @@ class Select(tk.Canvas):
             Select._open.close()
         if self.popup or not self.choices:
             return
-        win = self.winfo_toplevel()
+        win = self._overlay_parent()
         win.update_idletasks()
         font = F["base"]
         # Measure a real row: label borders and padding differ by system and font.
@@ -745,6 +785,17 @@ class Select(tk.Canvas):
         return tk.Label(parent, text=text, anchor="w", padx=14, pady=5, font=F["base"], bd=0,
                         highlightthickness=0, bg=C["surface"], fg=C["accent"] if current else C["fg"])
 
+    def _overlay_parent(self):
+        """Where the list is drawn: the dialog this dropdown is in, if any, else its window.
+        An open dialog takes the mouse for itself, so a list drawn on the window behind it
+        couldn't be clicked."""
+        w = self.master
+        while w is not None:
+            if isinstance(w, Dialog):
+                return w
+            w = getattr(w, "master", None)
+        return self.winfo_toplevel()
+
     def close(self, keep_guard=False):
         if self.popup is None:
             return
@@ -766,7 +817,7 @@ class Select(tk.Canvas):
         if self.popup is None:
             return
         try:
-            win = self.winfo_toplevel()
+            win = self._overlay_parent()
             changed = (win.winfo_width(), win.winfo_height()) != self._win_size
             gone = not self.winfo_viewable()
         except tk.TclError:
@@ -952,6 +1003,226 @@ class ChoiceList(tk.Frame):
                          fg=C["accent"] if picked else C["fg"])
 
 
+class CheckList(tk.Frame):
+    """A list where any number of rows can be ticked (for dialogs): a bordered box of rows,
+    scrolling when there are more than `rows`. Click a row to tick or untick it, Shift-click
+    to tick everything from the last row clicked to this one. Keys: Up/Down/Home/End move,
+    Space ticks, Ctrl+A (Cmd+A on macOS) ticks all, or unticks all when all are ticked.
+    keys() returns the ticked keys in list order; on_change fires whenever they change."""
+
+    def __init__(self, parent, choices, on_change=None, rows=8):
+        super().__init__(parent, bg=C["border"], padx=1, pady=1, takefocus=1)
+        self.choices = list(choices)
+        self.on_change = on_change
+        self.checked = set()               # row indexes
+        self.cursor = 0 if self.choices else -1
+        self.anchor = None                 # last row clicked, for Shift-click
+        self.hover = None
+        self.focused = False
+        probe = self._row(self, "Ag")[0]
+        probe.update_idletasks()
+        row_h = probe.winfo_reqheight()
+        probe.destroy()
+        if len(self.choices) > rows:
+            self.scroll = ScrollFrame(self, bg=C["surface"], pady=4)
+            self.scroll.configure(height=rows * row_h + row_h // 2 + 4)   # half a row peeks out
+            self.scroll.pack_propagate(False)
+            body = self.scroll.body
+        else:
+            self.scroll = None
+            body = tk.Frame(self, bg=C["surface"], pady=4)
+        (self.scroll or body).pack(fill="both", expand=True)
+        self.rows = []
+        for i, (_k, t) in enumerate(self.choices):
+            frame, box, label = self._row(body, t, lambda v, i=i: self._box_clicked(i))
+            frame.pack(fill="x")
+            for w in (frame, label):
+                w.bind("<Button-1>", lambda e, i=i: self._clicked(i, bool(e.state & 0x1)))
+            for w in (frame, box, label):
+                w.bind("<Enter>", lambda e, i=i: self._set_hover(i), add="+")
+                w.bind("<Leave>", lambda e: self._set_hover(None), add="+")
+            self.rows.append((frame, box, label))
+        for seq, d in (("<Up>", -1), ("<Down>", 1), ("<Prior>", -rows), ("<Next>", rows),
+                       ("<Home>", -10 ** 6), ("<End>", 10 ** 6)):
+            self.bind(seq, lambda e, d=d: self._move(d))
+        self.bind("<space>", lambda e: self._toggle(self.cursor))
+        mod = "Command" if osenv.IS_MAC else "Control"
+        for key in ("a", "A"):
+            self.bind(f"<{mod}-{key}>", lambda e: self.set_all(len(self.checked) < len(self.rows)))
+        self.bind("<FocusIn>", lambda e: self._set_focus(True))
+        self.bind("<FocusOut>", lambda e: self._set_focus(False))
+        self._paint()
+
+    @staticmethod
+    def _row(parent, text, command=None):
+        frame = tk.Frame(parent, bg=C["surface"], padx=12)
+        box = Toggle(frame, command=command)
+        box.pack(side="left", padx=(0, 10))
+        label = tk.Label(frame, text=text, anchor="w", pady=6, font=F["base"], bd=0, highlightthickness=0,
+                         bg=C["surface"], fg=C["fg"])
+        label.pack(side="left", fill="x", expand=True)
+        return frame, box, label
+
+    def keys(self):
+        return [self.choices[i][0] for i in sorted(self.checked)]
+
+    def set_all(self, on):
+        self.checked = set(range(len(self.rows))) if on else set()
+        self._changed()
+        return "break"
+
+    def _changed(self):
+        self._paint()
+        if self.on_change:
+            self.on_change()
+
+    def _box_clicked(self, i):
+        # The box has already flipped itself; _toggle sets it from our own record.
+        self.focus_set()
+        self.cursor = self.anchor = i
+        self._toggle(i)
+
+    def _clicked(self, i, shift):
+        self.focus_set()
+        self.cursor = i
+        if shift and self.anchor is not None:
+            lo, hi = sorted((self.anchor, i))
+            self.checked |= set(range(lo, hi + 1))
+            self._changed()
+        else:
+            self.anchor = i
+            self._toggle(i)
+
+    def _toggle(self, i):
+        if 0 <= i < len(self.rows):
+            self.checked ^= {i}
+            self._changed()
+        return "break"
+
+    def _move(self, d):
+        if self.rows:
+            self.cursor = max(0, min(len(self.rows) - 1, self.cursor + d))
+            self._paint()
+            if self.scroll is not None:
+                self.scroll.see(self.rows[self.cursor][0])
+        return "break"
+
+    def _set_hover(self, i):
+        self.hover = i
+        self._paint()
+
+    def _set_focus(self, on):
+        self.focused = on
+        self.configure(bg=C["accent"] if on else C["border"])
+        self._paint()
+
+    def _paint(self):
+        for j, (frame, box, label) in enumerate(self.rows):
+            on = j in self.checked
+            bg = C["select"] if on else C["hover"] if j == self.hover or (self.focused and j == self.cursor) \
+                else C["surface"]
+            frame.configure(bg=bg)
+            label.configure(bg=bg)
+            box.value = on
+            box.restyle(bg)
+
+
+class PopupMenu:
+    """A themed menu that opens inside the window under `anchor` (a button), like a Select's
+    list: no OS menu, so it looks the same on every system. items: (label, command) or
+    (label, command, hint), or None for a dividing line. Click an item, or use Up/Down and
+    Enter; Escape or a click elsewhere closes it."""
+
+    def __init__(self, anchor, items):
+        self.anchor, self.items = anchor, list(items)
+        self.popup, self.rows, self.hl, self.prev_focus = None, [], -1, None
+
+    def open(self):
+        if Select._open is not None:
+            Select._open.close()
+        if self.popup:
+            return
+        a = self.anchor
+        win = a.winfo_toplevel()
+        try:
+            self.prev_focus = win.focus_get()
+        except KeyError:
+            self.prev_focus = None
+        frame = self.popup = tk.Frame(win, bg=blend(C["fg"], C["surface"], 0.22), padx=1, pady=1)
+        body = tk.Frame(frame, bg=C["surface"], pady=4)
+        body.pack(fill="both", expand=True)
+        self.rows = []
+        for item in self.items:
+            if item is None:
+                tk.Frame(body, bg=C["border"], height=1).pack(fill="x", pady=4)
+                continue
+            i = len(self.rows)
+            row = tk.Frame(body, bg=C["surface"])
+            row.pack(fill="x")
+            parts = [row, tk.Label(row, text=item[0], anchor="w", padx=14, pady=6, font=F["base"],
+                                   bg=C["surface"], fg=C["fg"])]
+            parts[1].pack(side="left", fill="x", expand=True)
+            if len(item) > 2:
+                parts.append(tk.Label(row, text=item[2], padx=14, font=F["small"], bg=C["surface"], fg=C["faint"]))
+                parts[2].pack(side="right")
+            for w in parts:
+                w.bind("<Enter>", lambda e, i=i: self._highlight(i))
+                w.bind("<ButtonRelease-1>", lambda e, i=i: self._pick(i))
+            self.rows.append((parts, item[1]))
+        frame.update_idletasks()
+        w, h = max(frame.winfo_reqwidth(), 220), frame.winfo_reqheight()
+        x = a.winfo_rootx() - win.winfo_rootx() + a.winfo_width() - w       # right edges line up
+        top = a.winfo_rooty() - win.winfo_rooty()
+        y = top + a.winfo_height() + 4
+        if y + h > win.winfo_height() - 8 and top - 4 - h >= 8:
+            y = top - 4 - h
+        frame.place(x=max(8, min(x, win.winfo_width() - w - 8)), y=y, width=w)
+        frame.lift()
+        Select._open = self
+        _guard_clicks(win, frame)
+        for seq, fn in (("<Down>", lambda: self._step(1)), ("<Up>", lambda: self._step(-1)),
+                        ("<Return>", lambda: self._pick(self.hl)), ("<KP_Enter>", lambda: self._pick(self.hl)),
+                        ("<space>", lambda: self._pick(self.hl)), ("<Escape>", self.close),
+                        ("<Tab>", self.close)):
+            frame.bind(seq, lambda e, fn=fn: (fn(), "break")[1])
+        frame.bind("<FocusOut>", lambda e: self.close())
+        frame.focus_set()
+
+    def close(self, keep_guard=False):
+        if self.popup is None:
+            return
+        popup, self.popup, self.rows, self.hl = self.popup, None, [], -1
+        if Select._open is self:
+            Select._open = None
+        if not keep_guard:
+            _unguard_clicks()
+        prev, self.prev_focus = self.prev_focus, None
+        try:
+            had_focus = popup.focus_get() is popup
+            popup.destroy()
+            if had_focus and prev is not None and prev.winfo_exists():
+                prev.focus_set()
+        except (tk.TclError, KeyError):
+            pass
+
+    def _highlight(self, i):
+        self.hl = i
+        for j, (parts, _cmd) in enumerate(self.rows):
+            for w in parts:
+                w.configure(bg=C["select"] if j == i else C["surface"])
+
+    def _step(self, d):
+        if self.rows:
+            self._highlight((self.hl + d) % len(self.rows) if self.hl >= 0 else (0 if d > 0 else len(self.rows) - 1))
+
+    def _pick(self, i):
+        if not 0 <= i < len(self.rows):
+            return
+        command = self.rows[i][1]
+        self.close()
+        command()
+
+
 class InfoBar(tk.Frame):
     """A tinted strip with a message and optional buttons."""
 
@@ -1018,27 +1289,37 @@ def load_image(path, max_w, max_h):
         return None
 
 
-class Dialog(tk.Toplevel):
-    """A themed modal dialog. Build content in .body, add buttons with .button(); .run() returns
-    the value of the button pressed (or None when closed)."""
+class Dialog(tk.Frame):
+    """A themed modal dialog, drawn as a card inside the main window: no separate OS window
+    or title bar, so it looks the same on every system. Build content in .body, add buttons
+    with .button(); .run() returns the value of the button pressed (or None when closed).
+    While it is open the rest of the window ignores the mouse, and Tab stays inside it."""
+
+    stack = []          # open dialogs, the top one last
 
     def __init__(self, parent, title, width=460):
-        super().__init__(parent)
-        self.withdraw()
-        self.title(title)
-        self.configure(bg=C["surface"])
-        self.transient(parent)
-        self.resizable(True, True)
+        self.win = parent.winfo_toplevel()
+        # A dark band around a lighter edge sets the card off from what's behind it.
+        dark = int(C["bg"][1:3], 16) < 128
+        super().__init__(self.win, bg=blend("#000000", C["bg"], 0.45 if dark else 0.16), padx=3, pady=3)
+        edge = tk.Frame(self, bg=blend(C["fg"], C["surface"], 0.24), padx=1, pady=1)
+        edge.pack(fill="both", expand=True)
+        self.title_text = title
         self.result = None
-        self.minsize(width, 10)
-        self.width = width
-        self.body = tk.Frame(self, bg=C["surface"], padx=22, pady=18)
+        self.width = px(width)
+        self.footer = tk.Frame(edge, bg=C["surface2"], padx=16, pady=10)
+        self.footer.pack(fill="x", side="bottom")       # packed first: stays when space is short
+        self.body = tk.Frame(edge, bg=C["surface"], padx=22, pady=18)
         self.body.pack(fill="both", expand=True)
-        self.footer = tk.Frame(self, bg=C["surface2"], padx=16, pady=10)
-        self.footer.pack(fill="x", side="bottom")
-        self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda e: self.close())
+        self.bind("<Tab>", lambda e: self._tab(1))
+        for seq in ("<Shift-Tab>", "<ISO_Left_Tab>"):    # the second is Shift+Tab on Linux
+            try:
+                self.bind(seq, lambda e: self._tab(-1))
+            except tk.TclError:
+                pass
         self.default = None
+        self.prev_focus = None
 
     def heading(self, text, sub=None):
         tk.Label(self.body, text=text, font=F["section"], bg=C["surface"], fg=C["fg"],
@@ -1051,13 +1332,62 @@ class Dialog(tk.Toplevel):
         b.pack(side="right", padx=(8, 0))
         if default:
             self.default = value
-            self.bind("<Return>", lambda e: self.close(value))
+            for seq in ("<Return>", "<KP_Enter>"):
+                self.bind(seq, lambda e: self.close(value))
         return b
 
     def close(self, value=None):
+        if not self.winfo_exists():
+            return
         self.result = value
-        self.grab_release()
+        if self in Dialog.stack:
+            Dialog.stack.remove(self)
+        prev = self.prev_focus
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
         self.destroy()
+        try:
+            if Dialog.stack:                             # hand the mouse back to the dialog below
+                Dialog.stack[-1].grab_set()
+            if prev is not None and prev.winfo_exists():
+                prev.focus_set()
+        except tk.TclError:
+            pass
+
+    def _owns(self, w):
+        while w is not None and w is not self:
+            w = getattr(w, "master", None)
+        return w is self
+
+    def _tab(self, step):
+        """Move focus to the next (or previous) control inside this dialog."""
+        try:
+            w = self.focus_get() or self
+            for _ in range(300):
+                w = w.tk_focusNext() if step > 0 else w.tk_focusPrev()
+                if w is None:
+                    break
+                if self._owns(w):
+                    w.focus_set()
+                    break
+        except (tk.TclError, KeyError):
+            pass
+        return "break"
+
+    def _adopt(self):
+        """Let keys pressed in any control inside the dialog reach the dialog's own bindings
+        (Escape, Enter, Tab), the way they would reach a window's."""
+        me, top = str(self), str(self.win)
+        stack = list(self.winfo_children())
+        while stack:
+            w = stack.pop()
+            tags = w.bindtags()
+            if me not in tags:
+                i = tags.index(top) if top in tags else len(tags)
+                w.bindtags(tags[:i] + (me,) + tags[i:])
+            stack.extend(w.winfo_children())
 
     def _wrap_labels(self):
         # Wrapping text asks for room to fit on one line until it learns its width, which made
@@ -1071,30 +1401,41 @@ class Dialog(tk.Toplevel):
 
     def fit_scroll(self, scroll, max_share=0.6, min_h=40):
         """Size a ScrollFrame in this dialog to its content: as tall as needed, up to
-        max_share of the screen height, scrolling beyond that."""
+        max_share of the window's height, scrolling beyond that."""
         self._wrap_labels()
         self.update_idletasks()
         need = scroll.body.winfo_reqheight()
-        room = int(self.winfo_screenheight() * max_share)
+        room = int(self.win.winfo_height() * max_share)
         bar = scroll.vsb.winfo_reqwidth() if need > room else 0     # leave room for the scroll bar
         scroll.canvas.configure(width=self.width - 2 * 22 - bar, height=max(min_h, min(need, room)))
 
     def run(self):
+        win = self.win
+        if Select._open is not None:
+            Select._open.close()
         self._wrap_labels()
+        self._adopt()
         self.update_idletasks()
-        p = self.master.winfo_toplevel()
-        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-        x = p.winfo_rootx() + (p.winfo_width() - w) // 2
-        y = p.winfo_rooty() + max(40, (p.winfo_height() - h) // 3)
-        self.geometry(f"+{max(0, x)}+{max(0, y)}")
-        self.deiconify()
+        win_w, win_h = win.winfo_width(), win.winfo_height()
+        w = max(120, min(max(self.width, self.winfo_reqwidth()), win_w - 32))
+        h = self.winfo_reqheight()
+        if h > win_h - 48:                    # taller than the window: fill it, footer stays visible
+            self.place(relx=0.5, anchor="n", y=24, width=w, height=max(80, win_h - 48))
+        else:                                 # height follows the content
+            self.place(relx=0.5, anchor="n", y=max(24, (win_h - h) // 3), width=w)
         self.lift()
+        try:
+            self.prev_focus = win.focus_get()
+        except KeyError:
+            self.prev_focus = None
+        Dialog.stack.append(self)
+        self.update_idletasks()
         try:
             self.grab_set()
         except tk.TclError:
             pass
         self.focus_set()
-        self.wait_window()
+        self.wait_window(self)
         return self.result
 
 
