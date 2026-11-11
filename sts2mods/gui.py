@@ -541,8 +541,9 @@ class BrowsePage(tk.Frame):
                 return
             self.spinner.stop()
             self.more.set_enabled(True)
+            self.win.sync_certificate_notice()
             if result is None:
-                self._placeholder(osenv.CERTIFICATES_HELP if osenv.certificates_missing() else
+                self._placeholder(self.win.certificate_help() or
                                   "Couldn't reach the Steam Workshop. Check your connection, then press "
                                   "Enter in the search box to try again.")
                 return
@@ -1119,8 +1120,9 @@ class Window:
         if st.settings and not st.settings.mods_enabled:
             gtexts.append("Mods are switched off globally in the game's settings.")
         gtexts += [f"{i.title}. {i.detail}" for i in gissues if i is not fs]
-        if osenv.certificates_missing():
-            gtexts.append(osenv.CERTIFICATES_HELP)
+        self._certificate_notice = self.certificate_help()
+        if self._certificate_notice:
+            gtexts.append(self._certificate_notice)
         self._bar(self.bar_global, "\n".join(gtexts))
 
         n = st.change_count()
@@ -1197,10 +1199,22 @@ class Window:
 
         def done(info):
             self.state.workshop.update(info)
+            self.sync_certificate_notice()
             if self.selected:
                 self.show_details(self.selected, keep_scroll=True)
 
         self.net.submit(lambda: workshop.fetch_details(ids, force=force), done)
+
+    def certificate_help(self):
+        """What to tell the user about a certificate problem, or None if there isn't one."""
+        if osenv.certificates_missing():
+            return osenv.CERTIFICATES_HELP
+        return osenv.CERTIFICATE_FAILED_HELP if workshop.certificate_failed() else None
+
+    def sync_certificate_notice(self):
+        """Refresh the notice at the top if a certificate problem has appeared or cleared."""
+        if self.certificate_help() != self._certificate_notice:
+            self.refresh_chrome()
 
     def _poll(self):
         running = game_mod.is_running()

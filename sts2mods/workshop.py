@@ -4,6 +4,7 @@ browsing/searching the Workshop through its public browse page (no account or AP
 import json
 import os
 import re
+import ssl
 import subprocess
 import threading
 import time
@@ -40,6 +41,20 @@ def _save_cache(cache):
     os.replace(tmp, CACHE_PATH)
 
 
+_certificate_failed = [False]
+
+
+def certificate_failed():
+    """True if the last request to Steam failed certificate verification."""
+    return _certificate_failed[0]
+
+
+def _note_result(error=None):
+    """Remember whether a request to Steam failed because its certificate couldn't be verified."""
+    reason = getattr(error, "reason", error)
+    _certificate_failed[0] = isinstance(reason, ssl.SSLCertVerificationError)
+
+
 def fetch_details(workshop_ids, force=False):
     """Blocking. Returns {wid: details}. Uses the cache when fresh; never raises on network errors."""
     cache = load_cache()
@@ -57,7 +72,9 @@ def fetch_details(workshop_ids, force=False):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT, context=osenv.ssl_context()) as resp:
                 items = json.load(resp)["response"]["publishedfiledetails"]
-        except (OSError, ValueError, KeyError):
+            _note_result()
+        except (OSError, ValueError, KeyError) as e:
+            _note_result(e)
             break
         for item in items:
             if str(item.get("result")) != "1":
@@ -123,8 +140,10 @@ def browse(query="", sort="trend", page=1):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT, context=osenv.ssl_context()) as resp:
             html = resp.read(16 * 1024 * 1024).decode("utf-8", "replace")
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        _note_result(e)
         return None
+    _note_result()
     return parse_browse(html)
 
 

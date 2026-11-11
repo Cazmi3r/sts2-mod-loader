@@ -491,6 +491,46 @@ class TestNeedsPillow(unittest.TestCase):
         self.assertIsNone(self._preview(side_effect=OSError("offline")))
 
 
+class TestCertificateFailure(unittest.TestCase):
+    def setUp(self):
+        workshop._note_result()
+        self.addCleanup(workshop._note_result)
+
+    def _browse(self, error):
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            return workshop.browse("anything")
+
+    def test_a_rejected_certificate_is_recognised(self):
+        import ssl
+        import urllib.error
+        self.assertIsNone(self._browse(urllib.error.URLError(ssl.SSLCertVerificationError(1, "bad"))))
+        self.assertTrue(workshop.certificate_failed())
+
+    def test_being_offline_is_not_a_certificate_problem(self):
+        import urllib.error
+        self.assertIsNone(self._browse(urllib.error.URLError(OSError("offline"))))
+        self.assertFalse(workshop.certificate_failed())
+
+    def test_a_later_success_clears_it(self):
+        import io
+        import ssl
+        import urllib.error
+        self._browse(urllib.error.URLError(ssl.SSLCertVerificationError(1, "bad")))
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(b"<html></html>")
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(workshop.browse("anything"), ([], None))
+        self.assertFalse(workshop.certificate_failed())
+
+    def test_details_requests_are_checked_too(self):
+        import ssl
+        import urllib.error
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError(ssl.SSLCertVerificationError(1, "bad"))), \
+                mock.patch.object(workshop, "load_cache", return_value={}), mock.patch.object(workshop, "_save_cache"):
+            workshop.fetch_details(["123"], force=True)
+        self.assertTrue(workshop.certificate_failed())
+
+
 class TestPrunePreviews(unittest.TestCase):
     def test_removes_only_what_it_should(self):
         d = tempfile.mkdtemp()

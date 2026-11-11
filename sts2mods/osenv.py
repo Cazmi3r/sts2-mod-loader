@@ -189,6 +189,10 @@ _SSL_CONTEXT = None
 CERTIFICATES_HELP = ("This Python can't check secure connections (it has no trusted certificates), so the "
                      "Steam Workshop can't be reached. Run \"Install Certificates.command\" from your Python "
                      "folder in Applications, or use Homebrew's Python: brew install python-tk.")
+CERTIFICATE_FAILED_HELP = ("Steam's secure connection couldn't be verified, so the Workshop can't be reached. "
+                           + ("If this Python came from python.org, run \"Install Certificates.command\" from its "
+                              "folder in Applications. " if IS_MAC else "")
+                           + "Check your computer's date and time, and any VPN or network filter.")
 
 
 def _python_has_ca_certs():
