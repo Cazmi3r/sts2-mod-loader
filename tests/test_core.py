@@ -32,6 +32,18 @@ def manifest(mod_id, deps=(), **extra):
     return json.dumps(data)
 
 
+def can_symlink():
+    """Windows only allows symlinks with Developer Mode on or as admin."""
+    tmp = tempfile.mkdtemp(prefix="sts2ml-link-")
+    try:
+        os.symlink(tmp, os.path.join(tmp, "link"))
+        return True
+    except OSError:
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 class FakeGame(game_mod.Game):
     pass
 
@@ -132,6 +144,7 @@ class TestShortFileNames(Sandbox):
     """Encrypted home folders cap file names at 143 characters. The fix moves the game's whole
     data folder to an unencrypted disk and links it back."""
 
+    @unittest.skipUnless(can_symlink(), "can't create symlinks (Windows without Developer Mode)")
     def test_relocate_user_data(self):
         base = os.path.join(self.tmp, "unencrypted")
         os.makedirs(base)
